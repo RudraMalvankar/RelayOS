@@ -32,9 +32,9 @@ from engine.executors.local_llm import LocalLLMExecutor
 from engine.executors.spacy_ner import SpacyNERExecutor
 from core.logger import setup_logger
 
-logger = setup_logger("base42_main")
+logger = setup_logger("RelayOS_main")
 
-class Base42Orchestrator:
+class RelayOSOrchestrator:
     def __init__(self):
         self.analyzer = PromptAnalyzer()  # Loads semantic model ONCE at startup
         self.decision_engine = DecisionEngine()
@@ -218,7 +218,7 @@ async def main():
             tasks_data = []
 
         from config import FeatureFlags
-        orchestrator = Base42Orchestrator()
+        orchestrator = RelayOSOrchestrator()
         semaphore = asyncio.Semaphore(FeatureFlags.FIREWORKS_CONCURRENCY) # Protect memory & API limits
 
         async def _bounded_process(task_dict):

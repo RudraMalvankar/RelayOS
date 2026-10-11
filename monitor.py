@@ -43,7 +43,7 @@ t = threading.Thread(target=monitor)
 t.start()
 
 print("Running pipeline and tracking peak resources...")
-subprocess.run('docker run --name base42_bench --rm --cpus="2" --memory="4g" -e FIREWORKS_API_KEY=fw_84W1aV4dLEnLReJ3noVXRh -v "C:/Users/mypc/Desktop/amd:/app" -v "C:/Users/mypc/Desktop/amd/input_samples:/input" -v "C:/Users/mypc/Desktop/amd/output:/output" ghcr.io/rudramalvankar/base42:latest python main.py 2>&1', shell=True)
+subprocess.run('docker run --name RelayOS_bench --rm --cpus="2" --memory="4g" -e FIREWORKS_API_KEY=fw_84W1aV4dLEnLReJ3noVXRh -v "C:/Users/mypc/Desktop/amd:/app" -v "C:/Users/mypc/Desktop/amd/input_samples:/input" -v "C:/Users/mypc/Desktop/amd/output:/output" ghcr.io/rudramalvankar/RelayOS:latest python main.py 2>&1', shell=True)
 
 is_running = False
 t.join()

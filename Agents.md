@@ -1,12 +1,12 @@
 # AMD Developer Hackathon (Act II) - Track 1: General-Purpose AI Agent
 
-This document outlines the detailed system architecture, routing strategy, edge-case handling, and implementation plan for the final version of **Base42**.
+This document outlines the detailed system architecture, routing strategy, edge-case handling, and implementation plan for the final version of **RelayOS**.
 
 ---
 
-## 1. System Architecture: Base42 AI Operating System
+## 1. System Architecture: RelayOS AI Operating System
 
-Base42 is a deterministic, cost-aware AI Operating System. Its core mandate is to maximize accuracy on the AMD Hackathon Track 1 evaluation set while driving Fireworks API token consumption to absolute zero wherever possible, strictly adhering to the 4GB RAM, 2 vCPU, and 10-minute constraints.
+RelayOS is a deterministic, cost-aware AI Operating System. Its core mandate is to maximize accuracy on the AMD Hackathon Track 1 evaluation set while driving Fireworks API token consumption to absolute zero wherever possible, strictly adhering to the 4GB RAM, 2 vCPU, and 10-minute constraints.
 
 ### Architecture Diagram
 
@@ -53,7 +53,7 @@ A zero-token heuristic parser that intercepts the output of the Local LLM. It ca
 If confidence falls below 0.75, it rejects the Local LLM answer and escalates to the Fireworks API.
 
 ### The Math Sandbox
-Raw `eval()` is a critical security vulnerability. Base42 uses `ast.parse` and a custom `NodeVisitor` to guarantee that only whitelisted numeric constants and mathematical operators (`+`, `-`, `math.sqrt`) are evaluated. This provides mathematically perfect answers at 0 token cost.
+Raw `eval()` is a critical security vulnerability. RelayOS uses `ast.parse` and a custom `NodeVisitor` to guarantee that only whitelisted numeric constants and mathematical operators (`+`, `-`, `math.sqrt`) are evaluated. This provides mathematically perfect answers at 0 token cost.
 
 ### Edge-Case Resilience
 The entire orchestration loop is wrapped in a `return_exceptions=True` gather block and a global fallback shell. If the container runs out of memory, or HuggingFace goes down, or a specific task throws a ZeroDivisionError, the system catches it and guarantees that a valid `results.json` schema is still written before exit.

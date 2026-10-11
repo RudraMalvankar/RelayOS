@@ -14,7 +14,7 @@ class JSONFormatter(logging.Formatter):
             log_obj["telemetry"] = record.telemetry
         return json.dumps(log_obj)
 
-def setup_logger(name: str = "base42") -> logging.Logger:
+def setup_logger(name: str = "RelayOS") -> logging.Logger:
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.setLevel(logging.INFO)

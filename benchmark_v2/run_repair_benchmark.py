@@ -12,7 +12,7 @@ peak_mem = 0.0
 is_monitoring = False
 cpu_history = []
 
-def monitor_container(container_name="base42_bench"):
+def monitor_container(container_name="RelayOS_bench"):
     global peak_cpu, peak_mem, cpu_history, is_monitoring
     while is_monitoring:
         try:
@@ -71,13 +71,13 @@ def main():
     
     # Start monitor thread
     is_monitoring = True
-    monitor_thread = threading.Thread(target=monitor_container, args=("base42_bench",))
+    monitor_thread = threading.Thread(target=monitor_container, args=("RelayOS_bench",))
     monitor_thread.daemon = True
     monitor_thread.start()
     
     # Run container with ENABLE_LOCAL_REPAIR=True
     cmd = [
-        "docker", "run", "--name", "base42_bench", "--rm",
+        "docker", "run", "--name", "RelayOS_bench", "--rm",
         "--cpus=2", "--memory=4g",
         "-v", f"{os.path.abspath('../input_samples')}:/input",
         "-v", f"{os.path.abspath('../output')}:/output",
@@ -89,7 +89,7 @@ def main():
         "-e", "FIREWORKS_API_KEY=fw_84W1aV4dLEnLReJ3noVXRh",
         "-e", "ENABLE_LOCAL_REPAIR=True"
     ]
-    cmd.append("ghcr.io/rudramalvankar/base42:latest")
+    cmd.append("ghcr.io/rudramalvankar/RelayOS:latest")
     
     print("\n--- RUNNING REPAIR BENCHMARK (ENABLE_LOCAL_REPAIR=True) ---")
     start_time = time.perf_counter()

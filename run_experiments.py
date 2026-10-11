@@ -35,7 +35,7 @@ def run_experiment(exp):
     for k, v in exp["env"].items():
         cmd.extend(["-e", f"{k}={v}"])
         
-    cmd.append("ghcr.io/rudramalvankar/base42:latest")
+    cmd.append("ghcr.io/rudramalvankar/RelayOS:latest")
     cmd.append("python")
     cmd.append("main.py")
     

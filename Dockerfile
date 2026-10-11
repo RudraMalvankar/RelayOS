@@ -50,7 +50,7 @@ RUN mkdir -p /input /output
 # Install libgomp1 required for llama-cpp-python universal CPU wheels
 RUN apt-get update && apt-get install -y libgomp1 && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory and copy the Base42 AI OS source code
+# Set the working directory and copy the RelayOS AI OS source code
 WORKDIR /app
 COPY . /app
 
