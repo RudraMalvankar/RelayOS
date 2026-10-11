@@ -1,271 +1,209 @@
-from .base import BaseExecutor
-from models.schemas import TaskContext, ExecutionResult
-from models.enums import ExecutionRoute
-from core.logger import setup_logger
+"""Supervised local GGUF inference with hard timeout isolation."""
+
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import time
+import multiprocessing as mp
 import os
+import time
+from typing import Optional
+
+from core.config import settings
+from core.logger import setup_logger
+from models.enums import ExecutionRoute, ExecutionState
+from models.schemas import ExecutionResult, TaskContext
+from .base import BaseExecutor
+
+logger = setup_logger("local_llm_executor")
 
 try:
     from llama_cpp import Llama, LlamaGrammar
     HAS_LLAMA = True
 except ImportError:
+    Llama = None
+    LlamaGrammar = None
     HAS_LLAMA = False
 
-logger = setup_logger("local_llm_executor")
+NER_GRAMMAR = r'''root ::= "[" entity ("," entity)* "]"
+entity ::= "{\"entity\": \"" [^\"]+ "\", \"label\": \"" label "\"}"
+label ::= "PERSON" | "ORGANIZATION" | "LOCATION" | "DATE"'''
 
-# Grammar-Constrained Decoding
-SENTIMENT_GRAMMAR = r'''
-root ::= "Positive" | "Negative" | "Neutral" | "Mixed"
-'''
 
-NER_GRAMMAR = r'''
-root ::= "[" entity ("," entity)* "]"
-entity ::= "{\"entity\": \"" [^"]+ "\", \"label\": \"" label "\"}"
-label ::= "PERSON" | "ORGANIZATION" | "LOCATION" | "DATE"
-'''
+def _prompt_for(category: str, prompt: str) -> list[dict[str, str]]:
+    if category == "sentiment":
+        return [{"role": "system", "content": "Classify sentiment as Positive, Negative, Neutral, or Mixed."}, {"role": "user", "content": prompt}]
+    if category == "ner":
+        return [{"role": "system", "content": "Extract entities into JSON list format."}, {"role": "user", "content": prompt}]
+    return [{"role": "system", "content": "Answer concisely."}, {"role": "user", "content": prompt}]
+
+
+def _worker_main(conn, model_path: str, n_threads: int) -> None:
+    model = None
+    try:
+        if not HAS_LLAMA:
+            conn.send({"ok": False, "error_code": "provider_unavailable", "error": "llama-cpp-python is not installed"})
+            return
+        model = Llama(model_path=model_path, n_ctx=512, n_batch=512, n_threads=n_threads, verbose=False)
+        conn.send({"ok": True})
+        while True:
+            request = conn.recv()
+            if request is None:
+                return
+            started = time.perf_counter()
+            grammar = None
+            if request["category"] == "ner" and LlamaGrammar is not None:
+                grammar = LlamaGrammar.from_string(NER_GRAMMAR)
+            response = model.create_chat_completion(
+                messages=_prompt_for(request["category"], request["prompt"]),
+                max_tokens=request["max_tokens"], temperature=0.0, grammar=grammar,
+                stop=["User:", "user:", "<|im_end|>"],
+            )
+            answer = response["choices"][0]["message"]["content"].strip()
+            conn.send({"ok": bool(answer), "answer": answer, "latency_ms": (time.perf_counter() - started) * 1000, "error_code": None if answer else "empty_response"})
+    except Exception as exc:
+        try:
+            conn.send({"ok": False, "error_code": "provider_error", "error": str(exc)})
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def _controlled_sleep_worker():
+    """Test/support target used to validate hard process termination."""
+    time.sleep(300)
+
+
+class WorkerState:
+    STARTING = "starting"
+    HEALTHY = "healthy"
+    BUSY = "busy"
+    COOLDOWN = "cooldown"
+    DEAD = "dead"
+    STOPPING = "stopping"
+
 
 class LocalLLMWorker:
-    def __init__(self, worker_id: int, model_path: str):
-        self.worker_id = worker_id
+    def __init__(self, model_path: str):
+        self.model_path = model_path
+        self.state = WorkerState.DEAD
+        self.process: Optional[mp.Process] = None
+        self.parent_conn = None
         self.lock = asyncio.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=1)
-        self.llm = None
-        load_start = time.time()
-        try:
-            from config import FeatureFlags
-            n_threads = 2 if getattr(FeatureFlags, "ENABLE_FIXED_LLAMA_THREADS", False) else 1
-            self.llm = Llama(
-                model_path=model_path,
-                n_ctx=512, # Qwen2.5 benefits from larger context for complex prompts
-                n_batch=512,
-                n_threads=n_threads, 
-                verbose=False
-            )
-            load_time = time.time() - load_start
-            logger.info(f"Worker {worker_id} successfully loaded model in {load_time:.2f}s")
-        except Exception as e:
-            logger.error(f"Worker {worker_id} failed to load model: {e}")
+        self.restart_count = 0
+
+    def start(self) -> bool:
+        if self.process and self.process.is_alive():
+            return self.state == WorkerState.HEALTHY
+        if not HAS_LLAMA or not os.path.exists(self.model_path):
+            self.state = WorkerState.DEAD
+            return False
+        self.state = WorkerState.STARTING
+        ctx = mp.get_context("spawn")
+        self.parent_conn, child_conn = ctx.Pipe()
+        self.process = ctx.Process(target=_worker_main, args=(child_conn, self.model_path, 1), daemon=True)
+        self.process.start()
+        if self.parent_conn.poll(settings.local_startup_timeout_seconds):
+            message = self.parent_conn.recv()
+            if message.get("ok"):
+                self.state = WorkerState.HEALTHY
+                return True
+        self.terminate()
+        return False
+
+    def terminate(self) -> bool:
+        self.state = WorkerState.STOPPING
+        process = self.process
+        if process:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=2)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=2)
+            if process.is_alive():
+                self.state = WorkerState.DEAD
+                return False
+        self.process = None
+        self.parent_conn = None
+        self.state = WorkerState.DEAD
+        return True
+
 
 class LocalLLMExecutor(BaseExecutor):
-    def __init__(self, model_path: str = "./weights/model.gguf"):
-        self.model_path = model_path
-        self.workers = []
+    def __init__(self, model_path: Optional[str] = None):
+        self.model_path = model_path or settings.local_model_path
+        self.worker = LocalLLMWorker(self.model_path)
+        self.queue = asyncio.Queue(maxsize=max(1, settings.local_queue_size))
         self.circuit_breaker_tripped = False
-        if HAS_LLAMA:
-            logger.info("Initializing SINGLETON Qwen2.5 Worker with n_threads=2 for max CPU utilization...")
-            w1 = LocalLLMWorker(1, model_path)
-            # Override n_threads to 2 for the singleton worker if flag is not set
-            from config import FeatureFlags
-            if w1.llm and not getattr(FeatureFlags, "ENABLE_FIXED_LLAMA_THREADS", False):
-                w1.llm.n_threads = 2
-            self.workers.append(w1)
-            # Model warm-up
-            try:
-                logger.info("Warming up model with empty prompt...")
-                w1.llm.create_chat_completion([{"role": "user", "content": "hi"}], max_tokens=2, temperature=0.0)
-                logger.info("Model warm-up complete.")
-            except:
-                pass
-        else:
-            logger.warning("llama-cpp-python is not installed.")
+        self._shutdown = False
+        self._startup_lock = asyncio.Lock()
 
     def is_available(self) -> bool:
-        from config import FeatureFlags
-        if getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False) and self.circuit_breaker_tripped:
-            return False
-        return len(self.workers) > 0
+        return HAS_LLAMA and not self._shutdown and not self.circuit_breaker_tripped
 
-    def _get_grammar(self, category: str):
-        try:
-            if category == "ner":
-                return LlamaGrammar.from_string(NER_GRAMMAR)
-        except Exception as e:
-            logger.warning(f"Failed to compile grammar for {category}: {e}")
-        return None
+    async def _ensure_worker(self) -> bool:
+        async with self._startup_lock:
+            if self.worker.state == WorkerState.HEALTHY and self.worker.process and self.worker.process.is_alive():
+                return True
+            if self.worker.restart_count >= settings.local_restart_limit:
+                self.circuit_breaker_tripped = True
+                return False
+            self.worker.restart_count += 1
+            try:
+                return await asyncio.to_thread(self.worker.start)
+            except asyncio.CancelledError:
+                await asyncio.to_thread(self.worker.terminate)
+                raise
 
-    def _get_prompt(self, category: str, prompt: str) -> list:
-        # Few-shot prompting for strict adherence
-        if category == "sentiment":
-            return [
-                {"role": "system", "content": "Classify sentiment as Positive, Negative, Neutral, or Mixed, and provide a one-sentence reason."},
-                {"role": "user", "content": "I hate this late delivery, but the customer service was nice."},
-                {"role": "assistant", "content": "Mixed - The delivery was late but the customer service was nice."},
-                {"role": "user", "content": prompt}
-            ]
-        elif category == "ner":
-            return [
-                {"role": "system", "content": "Extract entities into JSON list format."},
-                {"role": "user", "content": "John went to Apple in New York on Jan 1."},
-                {"role": "assistant", "content": '[{"entity": "John", "label": "PERSON"}, {"entity": "Apple", "label": "ORGANIZATION"}, {"entity": "New York", "label": "LOCATION"}, {"entity": "Jan 1", "label": "DATE"}]'},
-                {"role": "user", "content": prompt}
-            ]
-        else:
-            return [
-                {"role": "system", "content": "Answer concisely."},
-                {"role": "user", "content": prompt}
-            ]
-
-    def _invoke_sync(self, worker: LocalLLMWorker, prompt: str, max_tokens: int, category: str = "general") -> str:
-        grammar = self._get_grammar(category)
-        messages = self._get_prompt(category, prompt)
-        
-        inf_start = time.time()
-        
-        # Performance optimizations for Factual
-        stop_seqs = ["User:", "user:", "<|im_end|>"]
-        if category == "factual":
-            max_tokens = min(max_tokens, 128) # Qwen2.5 generates concise factual answers
-            
-        response = worker.llm.create_chat_completion(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.0, # Qwen2.5 handles deterministic decoding well unlike TinyLlama
-            grammar=grammar,
-            stop=stop_seqs
-        )
-        inf_time = time.time() - inf_start
-        logger.info(f"[DIAGNOSTIC] Actual local inference time: {inf_time:.2f}s")
-        return response["choices"][0]["message"]["content"].strip()
+    async def _receive_response(self, timeout: float):
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            if self.worker.parent_conn.poll(0.05):
+                return self.worker.parent_conn.recv()
+            await asyncio.sleep(0)
+        raise asyncio.TimeoutError
 
     async def execute(self, context: TaskContext) -> ExecutionResult:
-        if not self.is_available():
-            logger.warning(f"Task {context.request.task_id}: Local LLM unavailable.")
-            return self._fallback(context.request.task_id)
-
-        # Admission Control
-        idle_worker = None
-        for w in self.workers:
-            if not w.lock.locked():
-                idle_worker = w
-                break
-                
-        from config import FeatureFlags
-        wait_time = 0.0
-        experiment_mode = getattr(FeatureFlags, "ENABLE_LOCAL_QUEUE_EXPERIMENT", False)
-        breaker_mode = getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False)
-        
-        if not idle_worker and (FeatureFlags.ENABLE_SMART_ROUTING_V2 or experiment_mode or breaker_mode):
-            wait_start = time.time()
-            if experiment_mode:
-                logger.info(f"Task {context.request.task_id}: Local workers busy. Entering INFINITE wait queue (experiment)...")
-            elif breaker_mode:
-                logger.info(f"Task {context.request.task_id}: Local workers busy. Entering wait queue (max 60s breaker)...")
-            else:
-                logger.info(f"Task {context.request.task_id}: Local workers busy. Entering wait queue (max 12s)...")
-                
+        if not self.is_available() or not await self._ensure_worker():
+            return self._failure(context, "provider_unavailable", "Local worker is unavailable")
+        queued_at = time.perf_counter()
+        try:
+            self.queue.put_nowait(context.request.task_id)
+        except asyncio.QueueFull:
+            return self._failure(context, "queue_full", "Local inference queue is full")
+        async with self.worker.lock:
+            await self.queue.get()
+            queue_wait_ms = (time.perf_counter() - queued_at) * 1000
+            self.worker.state = WorkerState.BUSY
             try:
-                while not idle_worker:
-                    elapsed = time.time() - wait_start
-                    if breaker_mode and elapsed >= 60.0:
-                        break
-                    elif not experiment_mode and not breaker_mode and elapsed >= 12.0:
-                        break
-                    sleep_time = 0.05 if getattr(FeatureFlags, "ENABLE_QUEUE_SLEEP", False) else 0.5
-                    await asyncio.sleep(sleep_time)
-                    for w in self.workers:
-                        if not w.lock.locked():
-                            idle_worker = w
-                            break
-                wait_time = time.time() - wait_start
-                logger.info(f"[DIAGNOSTIC] Task {context.request.task_id} Queue wait time: {wait_time:.2f}s")
+                max_tokens = 256
+                if context.profile and context.profile.estimated_output_tokens:
+                    max_tokens = min(max(int(context.profile.estimated_output_tokens * 1.2), 256), 512)
+                self.worker.parent_conn.send({"task_id": context.request.task_id, "prompt": context.request.prompt, "category": context.category.value if context.category else "general", "max_tokens": max_tokens})
+                response = await self._receive_response(settings.local_inference_timeout_seconds)
+                self.worker.state = WorkerState.HEALTHY
+                if not response.get("ok"):
+                    return self._failure(context, response.get("error_code", "provider_error"), response.get("error", "Local inference failed"), queue_wait_ms)
+                return ExecutionResult(task_id=context.request.task_id, answer=response["answer"], route_taken=ExecutionRoute.LOCAL_LLM, state=ExecutionState.SUCCESS, queue_wait_ms=queue_wait_ms, latency_ms=response.get("latency_ms"), model=self.model_path)
             except asyncio.TimeoutError:
-                logger.error(f"[DIAGNOSTIC] Task {context.request.task_id} Timeout occurred while WAITING in queue")
-                return self._fallback(context.request.task_id)
+                self.worker.state = WorkerState.COOLDOWN
+                self.worker.terminate()
+                return self._failure(context, "timeout", "Local inference deadline exceeded", queue_wait_ms)
+            except asyncio.CancelledError:
+                self.worker.state = WorkerState.COOLDOWN
+                await asyncio.to_thread(self.worker.terminate)
+                raise
+            except Exception as exc:
+                self.worker.terminate()
+                return self._failure(context, "provider_error", "Local inference failed", queue_wait_ms, str(exc))
+            finally:
+                self.queue.task_done()
 
-        if not idle_worker:
-            if breaker_mode:
-                logger.warning(f"Circuit Breaker tripped for {context.request.task_id} during queue!")
-                self.circuit_breaker_tripped = True
-            logger.warning(f"[DIAGNOSTIC] Task {context.request.task_id}: Timeout occurred while WAITING. Admission Control REJECT. Routing to Fireworks.")
-            return self._fallback(context.request.task_id)
+    def _failure(self, context: TaskContext, code: str, message: str, queue_wait_ms: Optional[float] = None, detail: Optional[str] = None) -> ExecutionResult:
+        return ExecutionResult(task_id=context.request.task_id, answer="", route_taken=ExecutionRoute.LOCAL_LLM, state=ExecutionState.FAILED_RETRYABLE, fallback_triggered=True, queue_wait_ms=queue_wait_ms, error_code=code, error_message=detail or message, fallback_reason=code)
 
-        # Formal async lock acquisition to provably guarantee mutually exclusive entry
-        await idle_worker.lock.acquire()
-        
-        max_tokens = 256
-        if context.profile and context.profile.estimated_output_tokens:
-            max_tokens = int(context.profile.estimated_output_tokens * 1.2)
-            max_tokens = min(max(max_tokens, 256), 512)
+    async def shutdown(self) -> None:
+        self._shutdown = True
+        await asyncio.to_thread(self.worker.terminate)
 
-        start_time = time.time()
-        try:
-            logger.info(f"Task {context.request.task_id}: Routing to Local Worker {idle_worker.worker_id}")
-            loop = asyncio.get_running_loop()
-            
-            inf_timeout = 60.0 if getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False) else 18.0
-            
-            answer = await asyncio.wait_for(
-                loop.run_in_executor(idle_worker.executor, self._invoke_sync, idle_worker, context.request.prompt, max_tokens, context.category.value),
-                timeout=inf_timeout
-            )
-            
-            latency = time.time() - start_time
-            logger.info(f"Task {context.request.task_id}: Local Worker {idle_worker.worker_id} finished in {latency:.2f}s")
-            return ExecutionResult(
-                task_id=context.request.task_id,
-                answer=answer,
-                route_taken=ExecutionRoute.LOCAL_LLM,
-                fireworks_tokens=0,
-                latency_ms=latency * 1000.0
-            )
-        except asyncio.TimeoutError:
-            if getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False):
-                self.circuit_breaker_tripped = True
-                logger.warning(f"Circuit breaker TRIPPED! Task {context.request.task_id} inference timeout.")
-            logger.error(f"Task {context.request.task_id}: Local Worker {idle_worker.worker_id} timed out")
-            return self._fallback(context.request.task_id)
-        except Exception as e:
-            if getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False):
-                self.circuit_breaker_tripped = True
-            logger.error(f"Task {context.request.task_id}: Local LLM error - {e}")
-            return self._fallback(context.request.task_id)
-        finally:
-            idle_worker.lock.release()
-
-    def _fallback(self, task_id: str) -> ExecutionResult:
-        return ExecutionResult(
-            task_id=task_id,
-            answer="",
-            route_taken=ExecutionRoute.LOCAL_LLM,
-            fallback_triggered=True
-        )
-
-    async def math_extraction_fallback(self, prompt: str) -> str:
-        from config import FeatureFlags
-        if FeatureFlags.ENABLE_RESERVED_LOCAL_WORKERS:
-            # Bypass math to Fireworks to reserve local workers for classification tasks
-            return None
-            
-        if not self.is_available():
-            return None
-            
-        idle_worker = None
-        for w in self.workers:
-            if not w.lock.locked():
-                idle_worker = w
-                break
-                
-        if not idle_worker:
-            return None # Admission control reject
-            
-        await idle_worker.lock.acquire()
-        try:
-            loop = asyncio.get_running_loop()
-            from engine.executors.math_word_solver import solve_word_problem
-            
-            def math_worker_sync():
-                def llm_call(p):
-                    return self._invoke_sync(idle_worker, p, 256, "general")
-                return solve_word_problem(prompt, llm_call)
-                
-            ans = await asyncio.wait_for(
-                loop.run_in_executor(idle_worker.executor, math_worker_sync),
-                timeout=5.0
-            )
-            return ans
-        except Exception:
-            return None
-        finally:
-            idle_worker.lock.release()
+    async def math_extraction_fallback(self, prompt: str) -> Optional[str]:
+        return None

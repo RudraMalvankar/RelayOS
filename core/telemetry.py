@@ -1,9 +1,10 @@
 import json
 import time
 import asyncio
-from typing import List, Dict
+from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 from core.logger import setup_logger
+from core.config import settings
 
 logger = setup_logger("telemetry")
 
@@ -15,6 +16,14 @@ class TaskTrace:
     route: str
     fallback_triggered: bool
     tokens: int
+    state: str = "unknown"
+    provider: str = "unknown"
+    model: str = "unknown"
+    retry_count: int = 0
+    validation_passed: Optional[bool] = None
+    confidence: Optional[float] = None
+    queue_wait_ms: Optional[float] = None
+    error_code: Optional[str] = None
 
 class TelemetryService:
     _instance = None
@@ -41,6 +50,9 @@ class TelemetryService:
     async def record(self, trace: TaskTrace):
         async with self._lock:
             self.traces.append(trace)
+            max_traces = max(1, settings.max_task_records)
+            if len(self.traces) > max_traces:
+                del self.traces[:-max_traces]
             self.counters["total_tasks"] += 1
             self.counters["total_tokens"] += trace.tokens
             
@@ -58,7 +70,7 @@ class TelemetryService:
 
     def _flush_checkpoint(self):
         try:
-            self.dump_report("/output/telemetry_checkpoint.json")
+            self.dump_report(settings.telemetry_path + ".checkpoint")
         except Exception:
             pass
 

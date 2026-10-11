@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Any, List, Tuple
 from .enums import TaskCategory, ComplexityLevel, ExecutionRoute, ExecutionState
 
@@ -14,12 +14,15 @@ class PromptProfile(BaseModel):
     estimated_input_tokens: int = 0
     estimated_output_tokens: int = 50
     primary_category: Optional[TaskCategory] = None
-    task_types: List[Tuple[str, float]] = []
+    task_types: List[Tuple[str, float]] = Field(default_factory=list)
     classification_method: Any = None
 
 class TaskRequest(BaseModel):
     task_id: str
     prompt: str
+    execution_mode: str = "auto"
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
 class TaskContext(BaseModel):
     request: TaskRequest
@@ -44,3 +47,12 @@ class ExecutionResult(BaseModel):
     queue_wait_ms: Optional[float] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    fallback_reason: Optional[str] = None
+
+    @model_validator(mode="after")
+    def reject_empty_success(self):
+        if not self.answer or not self.answer.strip():
+            if self.state == ExecutionState.SUCCESS:
+                self.state = ExecutionState.FAILED_RETRYABLE
+            self.error_code = self.error_code or "empty_response"
+        return self

@@ -20,6 +20,8 @@ class ExecutionRoute(str, Enum):
     PYTHON = "python"
     LOCAL_LLM = "local_llm"
     FIREWORKS = "fireworks"
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
 
 class ExecutionState(str, Enum):
     SUCCESS = "success"

@@ -29,6 +29,7 @@ from core.telemetry import TelemetryService, TaskTrace
 from engine.executors.python import PythonExecutor
 from engine.executors.fireworks import FireworksExecutor
 from engine.executors.local_llm import LocalLLMExecutor
+from engine.executors.cloud import CloudProviderExecutor
 from engine.executors.spacy_ner import SpacyNERExecutor
 from core.logger import setup_logger
 
@@ -36,23 +37,51 @@ logger = setup_logger("RelayOS_main")
 
 class RelayOSOrchestrator:
     def __init__(self):
-        self.analyzer = PromptAnalyzer()  # Loads semantic model ONCE at startup
+        self.analyzer = PromptAnalyzer()
         self.decision_engine = DecisionEngine()
         self.python_exec = PythonExecutor()
         
         # Point to the Qwen2.5 model (Supports both Docker and Local dev paths)
-        model_path = "/model/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
-        if not os.path.exists(model_path):
-            model_path = "./model/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
-            
-        self.local_exec = LocalLLMExecutor(model_path=model_path)
+        from core.config import settings
+        self.local_exec = LocalLLMExecutor(model_path=settings.local_model_path)
         self.api_exec = FireworksExecutor()
+        self.openai_exec = CloudProviderExecutor("openai")
+        self.anthropic_exec = CloudProviderExecutor("anthropic")
+        self.provider_initialization_errors = {}
+        for provider, executor in (("openai", self.openai_exec), ("anthropic", self.anthropic_exec)):
+            if executor.initialization_error:
+                self.provider_initialization_errors[provider] = "initialization_failed"
         
         from config import FeatureFlags
         if FeatureFlags.ENABLE_SPACY_NER:
             self.spacy_exec = SpacyNERExecutor()
         else:
             self.spacy_exec = None
+
+    def _requested_route(self, context: TaskContext):
+        request = context.request
+        if request.provider:
+            try:
+                return ExecutionRoute(request.provider)
+            except ValueError:
+                return None
+        if request.execution_mode == "local":
+            return ExecutionRoute.LOCAL_LLM
+        if request.execution_mode == "cloud":
+            return ExecutionRoute.FIREWORKS
+        return None
+
+    async def _execute_route(self, context: TaskContext) -> ExecutionResult:
+        route = context.route
+        if route == ExecutionRoute.FIREWORKS:
+            return await self.api_exec.execute(context)
+        if route == ExecutionRoute.OPENAI:
+            return await self.openai_exec.execute(context)
+        if route == ExecutionRoute.ANTHROPIC:
+            return await self.anthropic_exec.execute(context)
+        if route == ExecutionRoute.LOCAL_LLM:
+            return await self.local_exec.execute(context)
+        return await self.python_exec.execute(context)
             
     async def _execute_single_route(self, context: TaskContext) -> ExecutionResult:
         """Helper to execute a single atomic task."""
@@ -87,15 +116,13 @@ class RelayOSOrchestrator:
                 except Exception as e:
                     logger.warning(f"Task {context.request.task_id}: Local LLM crashed during experiment ({e}). Falling back.")
 
-        if route == ExecutionRoute.FIREWORKS:
-            result = await self.api_exec.execute(context)
-        elif route == ExecutionRoute.LOCAL_LLM:
-            try:
-                result = await self.local_exec.execute(context)
-            except Exception as e:
-                logger.warning(f"Task {context.request.task_id}: Local LLM crashed/timed out ({e}). Bypassing to Fireworks API.")
-                result = await self.api_exec.execute(context)
+        if route in (ExecutionRoute.FIREWORKS, ExecutionRoute.LOCAL_LLM, ExecutionRoute.OPENAI, ExecutionRoute.ANTHROPIC):
+            result = await self._execute_route(context)
+            if result.state != ExecutionState.SUCCESS and route == ExecutionRoute.LOCAL_LLM:
                 fallback_triggered = True
+                context.failed_attempts += 1
+                context.route = ExecutionRoute.FIREWORKS
+                result = await self.api_exec.execute(context)
         else:
             result = await self.python_exec.execute(context)
             if result.fallback_triggered and context.category.value == "math" and self.local_exec.is_available():
@@ -107,18 +134,13 @@ class RelayOSOrchestrator:
         final_result = ResultValidator.sanitize(result, context.category)
         
         # Fallback Loop
-        if not ConfidenceEngine.evaluate(final_result, context):
+        if final_result.state != ExecutionState.SUCCESS or not ConfidenceEngine.evaluate(final_result, context):
             fallback_triggered = True
             logger.warning(f"Task {context.request.task_id}: Low confidence in {route.value}. Recalculating route.")
             context.failed_attempts += 1
             context.route = self.decision_engine.route(context)
             
-            if context.route == ExecutionRoute.FIREWORKS:
-                result = await self.api_exec.execute(context)
-            elif context.route == ExecutionRoute.LOCAL_LLM:
-                result = await self.local_exec.execute(context)
-            else:
-                result = await self.python_exec.execute(context)
+            result = await self._execute_route(context)
                 
             final_result = ResultValidator.sanitize(result, context.category)
             
@@ -143,7 +165,7 @@ class RelayOSOrchestrator:
         dag = DAGEngine()
         node_map = {}
         for st in sub_tasks:
-            st_req = TaskRequest(task_id=st.id, prompt=st.prompt)
+            st_req = TaskRequest(task_id=st.id, prompt=st.prompt, execution_mode=request.execution_mode, provider=request.provider, model=request.model)
             st_ctx = TaskContext(request=st_req, profile=profile, category=st.category, complexity=context.complexity)
             
             async def _exec_node(node_ref: DAGNode):
@@ -156,7 +178,7 @@ class RelayOSOrchestrator:
                             dep_text += f"[{d.task_id}]: {d.result.answer}\n"
                     ctx.request.prompt += dep_text
                     
-                ctx.route = self.decision_engine.route(ctx)
+                ctx.route = self._requested_route(ctx) or self.decision_engine.route(ctx)
                 return await self._execute_single_route(ctx)
                 
             node = DAGNode(task_id=st.id, executable=_exec_node, context=st_ctx)
@@ -186,11 +208,25 @@ class RelayOSOrchestrator:
             latency_ms=latency_ms,
             route=final_result.route_taken.value if final_result.route_taken else "UNKNOWN",
             fallback_triggered=fallback_triggered,
-            tokens=final_result.fireworks_tokens
+            tokens=final_result.fireworks_tokens,
+            state=final_result.state.value,
+            provider=final_result.route_taken.value if final_result.route_taken else "unknown",
+            model=final_result.model or "unknown",
+            retry_count=final_result.retry_count,
+            validation_passed=final_result.validation_passed,
+            confidence=final_result.confidence,
+            queue_wait_ms=final_result.queue_wait_ms,
+            error_code=final_result.error_code,
         )
         await TelemetryService.get_instance().record(trace)
         
         return final_result
+
+    async def shutdown(self):
+        await self.local_exec.shutdown()
+        await self.api_exec.shutdown()
+        await self.openai_exec.shutdown()
+        await self.anthropic_exec.shutdown()
 
 async def main():
     import sys
@@ -278,7 +314,8 @@ async def main():
             logger.info(f"Successfully wrote {len(output_data)} results to {output_path}")
             
             # Dump telemetry
-            TelemetryService.get_instance().dump_report("/output/telemetry.json")
+            from core.config import settings
+            TelemetryService.get_instance().dump_report(settings.telemetry_path)
         except Exception as e:
             logger.error(f"Failed to write results: {e}")
             

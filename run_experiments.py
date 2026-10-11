@@ -27,7 +27,7 @@ def run_experiment(exp):
         "-v", f"{os.path.abspath('input_samples')}:/input",
         "-v", f"{os.path.abspath('output')}:/output",
         "-v", f"{os.path.abspath('engine')}:/app/engine",
-        "-e", "FIREWORKS_API_KEY=fw_84W1aV4dLEnLReJ3noVXRh",
+        "-e", f"FIREWORKS_API_KEY={os.environ.get('FIREWORKS_API_KEY', '')}",
         "-e", "FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1",
         "-e", "ALLOWED_MODELS=accounts/fireworks/models/deepseek-v4-flash,accounts/fireworks/models/deepseek-v4-pro"
     ]

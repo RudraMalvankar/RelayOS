@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
 
 
 class ProviderCapability(str, Enum):
@@ -13,6 +13,7 @@ class ProviderCapability(str, Enum):
 class ProviderDescriptor:
     name: str
     configured: bool
+    status: str = "unavailable"
     models: list[str] = field(default_factory=list)
     capabilities: list[ProviderCapability] = field(default_factory=lambda: [ProviderCapability.CHAT])
     reason: Optional[str] = None
@@ -21,6 +22,7 @@ class ProviderDescriptor:
         return {
             "name": self.name,
             "configured": self.configured,
+            "status": self.status,
             "models": self.models,
             "capabilities": [capability.value for capability in self.capabilities],
             "reason": self.reason,
@@ -43,4 +45,16 @@ class ProviderError(RuntimeError):
         self.provider = provider
         self.code = code
         self.retryable = retryable
+
+
+class ProviderAdapter(Protocol):
+    """Common async contract implemented by optional cloud providers."""
+
+    name: str
+
+    async def complete(self, prompt: str, model: str, *, timeout: Optional[float] = None) -> ProviderResponse:
+        ...
+
+    async def close(self) -> None:
+        ...
 

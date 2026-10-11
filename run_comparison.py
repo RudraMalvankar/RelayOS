@@ -78,7 +78,7 @@ def run_run(enable_repair: bool) -> dict:
         "-v", f"{os.path.abspath('core')}:/app/core",
         "-v", f"{os.path.abspath('main.py')}:/app/main.py",
         "-v", f"{os.path.abspath('config.py')}:/app/config.py",
-        "-e", "FIREWORKS_API_KEY=fw_84W1aV4dLEnLReJ3noVXRh",
+        "-e", f"FIREWORKS_API_KEY={os.environ.get('FIREWORKS_API_KEY', '')}",
         "-e", "FIREWORKS_CONCURRENCY=1",
         "-e", f"ENABLE_LOCAL_REPAIR={'True' if enable_repair else 'False'}"
     ]

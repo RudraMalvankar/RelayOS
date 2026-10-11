@@ -5,10 +5,12 @@ from core.config import settings
 from core.logger import setup_logger
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from providers.base import ProviderError, ProviderResponse
 
 logger = setup_logger("fireworks_executor")
 
 class FireworksExecutor(BaseExecutor):
+    name = "fireworks"
     def __init__(self):
         self.client = httpx.AsyncClient(
             base_url=settings.fireworks_base_url,
@@ -20,6 +22,8 @@ class FireworksExecutor(BaseExecutor):
         )
         
     def _select_model(self, context: TaskContext) -> str:
+        if context.request.model:
+            return context.request.model
         # Step 4: Retry with Pro if Flash failed (failed_attempts > 1)
         if getattr(context, "failed_attempts", 0) > 1:
             return settings.fireworks_reasoning_model
@@ -101,9 +105,20 @@ class FireworksExecutor(BaseExecutor):
                 fallback_triggered=True,
                 fireworks_tokens=tokens,
                 error_code="provider_error",
-                error_message=str(e),
+                error_message="Fireworks request failed",
             )
             
+        if not answer:
+            return ExecutionResult(
+                task_id=context.request.task_id,
+                answer="",
+                route_taken=ExecutionRoute.FIREWORKS,
+                state=ExecutionState.FAILED_RETRYABLE,
+                fallback_triggered=True,
+                fireworks_tokens=tokens,
+                error_code="empty_response",
+                error_message="Fireworks returned an empty response",
+            )
         return ExecutionResult(
             task_id=context.request.task_id,
             answer=answer,
@@ -111,3 +126,25 @@ class FireworksExecutor(BaseExecutor):
             state=ExecutionState.SUCCESS,
             fireworks_tokens=tokens
         )
+
+    async def shutdown(self):
+        await self.client.aclose()
+
+    async def complete(self, prompt: str, model: str, *, timeout=None) -> ProviderResponse:
+        """Common provider-interface entry point for integrations and tests."""
+        try:
+            response = await self._post_chat({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": 1024})
+            data = response.json()
+            choice = data["choices"][0]
+            text = (choice["message"].get("content") or "").strip()
+            if not text:
+                raise ProviderError(self.name, "empty_response", "Fireworks returned an empty response", True)
+            usage = data.get("usage", {})
+            return ProviderResponse(provider=self.name, model=model, text=text, input_tokens=usage.get("prompt_tokens", 0), output_tokens=usage.get("completion_tokens", 0), finish_reason=choice.get("finish_reason"))
+        except ProviderError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            code = "provider_rate_limit" if exc.response.status_code == 429 else "provider_error"
+            raise ProviderError(self.name, code, "Fireworks request failed", exc.response.status_code >= 500 or exc.response.status_code == 429) from exc
+        except httpx.RequestError as exc:
+            raise ProviderError(self.name, "provider_unavailable", "Fireworks request failed", True) from exc

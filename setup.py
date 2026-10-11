@@ -11,7 +11,11 @@ setup(
         "llama-cpp-python",
         "pydantic",
         "httpx",
-        "tenacity"
+        "tenacity",
+        "fastapi",
+        "uvicorn",
+        "openai",
+        "anthropic",
     ],
     entry_points={
         "console_scripts": [

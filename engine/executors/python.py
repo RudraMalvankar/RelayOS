@@ -1,7 +1,8 @@
 from .base import BaseExecutor
 from models.schemas import TaskContext, ExecutionResult
-from models.enums import ExecutionRoute
+from models.enums import ExecutionRoute, ExecutionState
 from core.logger import setup_logger
+from core.config import settings
 import ast
 import operator
 import re
@@ -106,9 +107,13 @@ class MathSandbox:
     @classmethod
     def _eval_node(cls, node):
         if isinstance(node, ast.Constant):
-            if isinstance(node.value, (int, float, complex)):
-                return node.value
-            raise TypeError("Only numeric constants allowed")
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise ValueError("Only finite real numeric constants allowed")
+            if isinstance(node.value, int) and len(str(abs(node.value))) > settings.math_max_integer_digits:
+                raise ValueError("integer exceeds configured digit limit")
+            if isinstance(node.value, float) and not math.isfinite(node.value):
+                raise ValueError("non-finite numeric constant")
+            return node.value
         elif isinstance(node, ast.BinOp):
             if type(node.op) not in cls.OPERATORS:
                 raise TypeError(f"Unsupported operator: {type(node.op)}")
@@ -116,6 +121,8 @@ class MathSandbox:
             right = cls._eval_node(node.right)
             if type(node.op) in (ast.Div, ast.Mod, ast.FloorDiv) and right == 0:
                 raise ZeroDivisionError("Division by zero")
+            if isinstance(node.op, ast.Pow) and abs(right) > settings.math_max_exponent:
+                raise ValueError("exponent exceeds configured limit")
             return cls.OPERATORS[type(node.op)](left, right)
         elif isinstance(node, ast.UnaryOp):
             if type(node.op) not in cls.OPERATORS:
@@ -138,8 +145,22 @@ class MathSandbox:
     @classmethod
     def evaluate(cls, equation: str) -> str:
         try:
+            if len(equation) > settings.math_max_expression_chars:
+                raise ValueError("expression exceeds configured length limit")
             tree = ast.parse(equation, mode='eval').body
+            nodes = list(ast.walk(tree))
+            if len(nodes) > settings.math_max_ast_nodes:
+                raise ValueError("expression exceeds AST node limit")
+            def depth(node):
+                children = list(ast.iter_child_nodes(node))
+                return 1 + max((depth(child) for child in children), default=0)
+            if depth(tree) > settings.math_max_ast_depth:
+                raise ValueError("expression exceeds AST complexity limit")
             result = cls._eval_node(tree)
+            if isinstance(result, complex) or not isinstance(result, (int, float)):
+                raise ValueError("result is not a real number")
+            if not math.isfinite(float(result)) or abs(float(result)) > settings.math_max_result_magnitude:
+                raise ValueError("result exceeds configured numeric limits")
             # Format nicely, drop .0 for integers
             if isinstance(result, float) and result.is_integer():
                 return str(int(result))
@@ -161,18 +182,24 @@ class PythonExecutor(BaseExecutor):
                 task_id=context.request.task_id,
                 answer="",
                 route_taken=ExecutionRoute.PYTHON,
-                fallback_triggered=True
+                state=ExecutionState.FAILED_RETRYABLE,
+                fallback_triggered=True,
+                error_code="unsupported_expression",
+                error_message="No deterministic expression could be extracted",
             )
             
         try:
             logger.info(f"Task {context.request.task_id}: Executing math in AST Sandbox -> {equation}")
             answer = MathSandbox.evaluate(equation)
-        except Exception:
+        except Exception as exc:
             answer = "" # Trigger API fallback
             
         return ExecutionResult(
             task_id=context.request.task_id,
             answer=answer,
             route_taken=ExecutionRoute.PYTHON,
-            fallback_triggered=(answer == "")
+            state=ExecutionState.SUCCESS if answer else ExecutionState.FAILED_RETRYABLE,
+            fallback_triggered=(answer == ""),
+            error_code=None if answer else "math_error",
+            error_message=None if answer else str(exc),
         )

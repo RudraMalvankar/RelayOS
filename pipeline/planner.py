@@ -1,7 +1,7 @@
 import re
 from typing import List
 from models.schemas import TaskContext, ExecutionResult
-from models.enums import TaskCategory
+from models.enums import TaskCategory, ExecutionState
 from dataclasses import dataclass, field
 
 @dataclass
@@ -104,5 +104,9 @@ class ResultAggregator:
             task_id=original_task_id,
             answer=combined_answer.strip(),
             route_taken=final_route,
-            fireworks_tokens=total_tokens
+            fireworks_tokens=total_tokens,
+            state=ExecutionState.SUCCESS if results and all(r.state in (ExecutionState.SUCCESS, ExecutionState.FALLBACK_SUCCESS) for r in results) else ExecutionState.FAILED_FINAL,
+            fallback_triggered=any(r.fallback_triggered for r in results),
+            validation_passed=all(r.validation_passed is not False for r in results),
+            retry_count=sum(r.retry_count for r in results),
         )

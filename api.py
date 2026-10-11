@@ -8,10 +8,12 @@ status information.
 import asyncio
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from collections import defaultdict, deque
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -26,6 +28,9 @@ from providers.registry import ProviderRegistry
 class TaskCreate(BaseModel):
     prompt: str = Field(min_length=1)
     task_id: Optional[str] = None
+    execution_mode: str = Field(default="auto", pattern="^(auto|local|cloud)$")
+    provider: Optional[str] = Field(default=None, pattern="^(fireworks|openai|anthropic|local_llm)$")
+    model: Optional[str] = None
 
 
 class TaskSummary(BaseModel):
@@ -59,7 +64,17 @@ class _TaskRecord:
 
 
 def create_app(orchestrator: Any = None) -> FastAPI:
-    app = FastAPI(title="RelayOS API", version="1.0.0")
+    if settings.environment.lower() in {"production", "prod"} and not settings.api_token:
+        raise RuntimeError("RELAYOS_API_TOKEN must be configured when RELAYOS_ENV=production")
+
+    @asynccontextmanager
+    async def lifespan(app_instance: FastAPI):
+        yield
+        active_orchestrator = app_instance.state.orchestrator
+        if active_orchestrator is not None and hasattr(active_orchestrator, "shutdown"):
+            await active_orchestrator.shutdown()
+
+    app = FastAPI(title="RelayOS API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
@@ -71,12 +86,43 @@ def create_app(orchestrator: Any = None) -> FastAPI:
     app.state.orchestrator = orchestrator
     app.state.tasks: Dict[str, _TaskRecord] = {}
     app.state.task_lock = asyncio.Lock()
+    app.state.orchestrator_lock = asyncio.Lock()
     app.state.semaphore = asyncio.Semaphore(max(1, settings.max_concurrent_tasks))
+    app.state.rate_hits = defaultdict(deque)
 
     async def get_orchestrator():
         if app.state.orchestrator is None:
-            app.state.orchestrator = RelayOSOrchestrator()
+            async with app.state.orchestrator_lock:
+                if app.state.orchestrator is None:
+                    app.state.orchestrator = RelayOSOrchestrator()
         return app.state.orchestrator
+
+    async def authorize(request: Request, authorization: Optional[str] = Header(default=None)):
+        authentication_required = settings.environment.lower() in {"production", "prod"} or bool(settings.api_token)
+        if authentication_required:
+            expected = f"Bearer {settings.api_token}"
+            if authorization != expected:
+                raise HTTPException(status_code=401, detail="Authentication required")
+        now = time.time()
+        key = request.client.host if request.client else "unknown"
+        hits = app.state.rate_hits[key]
+        while hits and hits[0] <= now - 60:
+            hits.popleft()
+        if len(hits) >= settings.rate_limit_per_minute:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        hits.append(now)
+
+    async def prune_tasks():
+        cutoff = time.time() - settings.task_retention_seconds
+        async with app.state.task_lock:
+            expired = [task_id for task_id, record in app.state.tasks.items() if record.updated_at < cutoff and (not record.job or record.job.done())]
+            for task_id in expired:
+                app.state.tasks.pop(task_id, None)
+            if len(app.state.tasks) > settings.max_task_records:
+                records = sorted(app.state.tasks.values(), key=lambda item: item.updated_at)
+                for record in records[:len(app.state.tasks) - settings.max_task_records]:
+                    if not record.job or record.job.done():
+                        app.state.tasks.pop(record.task_id, None)
 
     async def run_task(record: _TaskRecord, request: TaskRequest):
         async with app.state.semaphore:
@@ -97,7 +143,7 @@ def create_app(orchestrator: Any = None) -> FastAPI:
                 record.error = "Task deadline exceeded"
             except Exception as exc:
                 record.status = "failed_final"
-                record.error = str(exc)
+                record.error = "Task execution failed"
             finally:
                 record.updated_at = time.time()
 
@@ -106,42 +152,55 @@ def create_app(orchestrator: Any = None) -> FastAPI:
         return {"status": "ok", "service": "relayos"}
 
     @app.get("/api/providers")
-    async def providers() -> dict:
-        return {"providers": ProviderRegistry().public_status()}
+    async def providers(_: None = Depends(authorize)) -> dict:
+        orchestrator = app.state.orchestrator
+        errors = getattr(orchestrator, "provider_initialization_errors", {}) if orchestrator else {}
+        return {"providers": ProviderRegistry(initialization_errors=errors).public_status()}
 
     @app.get("/api/models")
-    async def models() -> dict:
+    async def models(_: None = Depends(authorize)) -> dict:
         return {
             "fireworks": settings.allowed_models_list,
-            "anthropic": [],
-            "openai": [],
+            "anthropic": settings.anthropic_models_list,
+            "openai": settings.openai_models_list,
             "local": {"configured": bool(settings.local_model_path), "path": settings.local_model_path},
         }
 
     @app.post("/api/tasks", response_model=TaskSummary, status_code=202)
-    async def create_task(payload: TaskCreate):
+    async def create_task(payload: TaskCreate, _: None = Depends(authorize)):
         if len(payload.prompt) > settings.max_prompt_chars:
             raise HTTPException(status_code=413, detail="Prompt exceeds configured size limit")
+        if payload.provider == "local_llm" and payload.execution_mode == "cloud":
+            raise HTTPException(status_code=400, detail="local_llm cannot be used with cloud execution mode")
+        if payload.provider in {"fireworks", "openai", "anthropic"} and payload.execution_mode == "local":
+            raise HTTPException(status_code=400, detail="Cloud providers cannot be used with local execution mode")
+        if payload.model:
+            available = {
+                "fireworks": settings.allowed_models_list,
+                "openai": settings.openai_models_list,
+                "anthropic": settings.anthropic_models_list,
+            }
+            if payload.provider in available and payload.model not in available[payload.provider]:
+                raise HTTPException(status_code=400, detail="Requested model is not configured for this provider")
+        await prune_tasks()
         task_id = payload.task_id or str(uuid.uuid4())
         async with app.state.task_lock:
             if task_id in app.state.tasks:
                 raise HTTPException(status_code=409, detail="Task ID already exists")
             record = _TaskRecord(task_id=task_id)
             app.state.tasks[task_id] = record
-            record.job = asyncio.create_task(
-                run_task(record, TaskRequest(task_id=task_id, prompt=payload.prompt))
-            )
+            record.job = asyncio.create_task(run_task(record, TaskRequest(task_id=task_id, prompt=payload.prompt, execution_mode=payload.execution_mode, provider=payload.provider, model=payload.model)))
         return record.summary()
 
     @app.get("/api/tasks/{task_id}", response_model=TaskSummary)
-    async def get_task(task_id: str):
+    async def get_task(task_id: str, _: None = Depends(authorize)):
         record = app.state.tasks.get(task_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Task not found")
         return record.summary()
 
     @app.post("/api/tasks/{task_id}/cancel", response_model=TaskSummary)
-    async def cancel_task(task_id: str):
+    async def cancel_task(task_id: str, _: None = Depends(authorize)):
         record = app.state.tasks.get(task_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -152,7 +211,7 @@ def create_app(orchestrator: Any = None) -> FastAPI:
         return record.summary()
 
     @app.get("/api/metrics")
-    async def metrics() -> dict:
+    async def metrics(_: None = Depends(authorize)) -> dict:
         return TelemetryService.get_instance().counters
 
     return app

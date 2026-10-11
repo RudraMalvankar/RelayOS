@@ -5,6 +5,7 @@ import ast
 import json
 from models.schemas import ExecutionResult
 from models.enums import TaskCategory
+from models.enums import ExecutionState
 from core.logger import setup_logger
 
 logger = setup_logger("validator")
@@ -75,6 +76,13 @@ class JsonValidator(BaseValidator):
         self.category = category
 
     def validate(self, result: ExecutionResult) -> ExecutionResult:
+        if not result.answer or not result.answer.strip():
+            result.validation_passed = False
+            if result.state == ExecutionState.SUCCESS:
+                result.state = ExecutionState.FAILED_RETRYABLE
+            result.error_code = result.error_code or "empty_response"
+            result.error_message = result.error_message or "Executor returned an empty answer"
+            return result
         original = result.answer
         text = self.strip_fillers(original)
         text = self.strip_markdown_blocks(text)
@@ -96,11 +104,16 @@ class JsonValidator(BaseValidator):
                 parsed = SchemaCoercer.coerce(parsed, self.category)
                 
                 result.answer = json.dumps(parsed, separators=(',', ':'))
+                result.validation_passed = True
                 return result
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse JSON for task {result.task_id}. Returning raw.")
             
         result.answer = original
+        result.validation_passed = False
+        if result.state == ExecutionState.SUCCESS:
+            result.state = ExecutionState.FAILED_RETRYABLE
+        result.error_code = result.error_code or "validation_failed"
         return result
 
 class CodeValidator(BaseValidator):
@@ -108,6 +121,9 @@ class CodeValidator(BaseValidator):
         text = self.strip_fillers(result.answer)
         text = self.strip_markdown_blocks(text)
         result.answer = text
+        result.validation_passed = bool(text)
+        if not text and result.state == ExecutionState.SUCCESS:
+            result.state = ExecutionState.FAILED_RETRYABLE
         return result
 
 class MathValidator(BaseValidator):
@@ -117,12 +133,14 @@ class MathValidator(BaseValidator):
         # Preserve structured answers like "1.875 cups... Total cost = $4.50"
         if "$" in text or "cost" in text.lower() or "cups" in text.lower():
             result.answer = text
+            result.validation_passed = True
             return result
             
         try:
             val = ast.literal_eval(text)
             if isinstance(val, (int, float)):
                 result.answer = str(val)
+                result.validation_passed = True
                 return result
         except (ValueError, SyntaxError):
             pass
@@ -132,6 +150,7 @@ class MathValidator(BaseValidator):
         match = re.search(marker_regex, text, re.IGNORECASE)
         if match:
             result.answer = match.group(1)
+            result.validation_passed = True
             return result
             
         # Fallback to pure regex search
@@ -139,16 +158,24 @@ class MathValidator(BaseValidator):
         if matches:
             if len(matches) == 1:
                 result.answer = matches[0]
+                result.validation_passed = True
             else:
                 result.answer = text # Keep original text instead of joining with commas
+                result.validation_passed = bool(text)
         else:
             result.answer = text
+            result.validation_passed = False
+            if result.state == ExecutionState.SUCCESS:
+                result.state = ExecutionState.FAILED_RETRYABLE
             
         return result
 
 class DefaultValidator(BaseValidator):
     def validate(self, result: ExecutionResult) -> ExecutionResult:
         result.answer = self.strip_fillers(result.answer)
+        result.validation_passed = bool(result.answer)
+        if not result.validation_passed and result.state == ExecutionState.SUCCESS:
+            result.state = ExecutionState.FAILED_RETRYABLE
         return result
 
 class ResultValidator:

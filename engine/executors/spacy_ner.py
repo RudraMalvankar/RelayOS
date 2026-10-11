@@ -2,7 +2,7 @@ import json
 import logging
 from typing import List, Dict, Any
 from models.schemas import TaskContext, ExecutionResult
-from models.enums import ExecutionRoute
+from models.enums import ExecutionRoute, ExecutionState
 
 logger = logging.getLogger("spacy_ner")
 
@@ -28,6 +28,7 @@ class SpacyNERExecutor:
             task_id=context.request.task_id,
             answer="",
             route_taken=ExecutionRoute.PYTHON,  # Route taken could be local conceptually, but it saves api tokens.
+            state=ExecutionState.FAILED_RETRYABLE,
             fallback_triggered=True,
             fireworks_tokens=0
         )
@@ -65,6 +66,8 @@ class SpacyNERExecutor:
             if entities:
                 result.answer = json.dumps(entities)
                 result.fallback_triggered = False
+                result.state = ExecutionState.SUCCESS
+                result.validation_passed = True
             else:
                 # If no entities found, it might be a failure to extract. Trigger fallback.
                 result.fallback_triggered = True
