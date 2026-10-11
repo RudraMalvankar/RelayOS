@@ -42,7 +42,10 @@ OUTPUT_TOKEN_ESTIMATES = {
 class PromptAnalyzer:
     def __init__(self):
         self._structural = StructuralExtractor()
-        self._semantic: Optional[SemanticClassifier] = SemanticClassifier()
+        from config import FeatureFlags
+        self._semantic: Optional[SemanticClassifier] = (
+            SemanticClassifier() if FeatureFlags.ENABLE_SEMANTIC_CLASSIFIER else None
+        )
 
     def analyze(self, prompt: str) -> PromptProfile:
         # --- Layer 1: Always Run ---

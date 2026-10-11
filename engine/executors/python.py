@@ -57,9 +57,14 @@ class MathSandbox:
             
         # Match function calls like math.sqrt(144) or pure equations
         match = re.search(r'((?:math\.)?[a-z]{3,5}\s*\([\d\s\+\-\*\/\.\%]+\)|[\d\s\+\-\*\/\(\)\.\%]{3,})', clean, re.IGNORECASE)
-        if match and not is_word_problem_mode:
+        if match:
             expr = match.group(1).strip()
-            if expr and not re.fullmatch(r'[\d\.\s]+', expr):
+            # Plain arithmetic and whitelisted math calls should remain
+            # deterministic even when word-problem extraction is enabled.
+            has_only_allowed_math = not re.search(r'[a-z]', expr, re.IGNORECASE) or bool(
+                re.match(r'^(?:math\.)?(sqrt|sin|cos|tan|log|log10|pow|abs)\s*\(', expr, re.IGNORECASE)
+            )
+            if expr and has_only_allowed_math and not re.fullmatch(r'[\d\.\s]+', expr):
                 return expr
                 
         if getattr(FeatureFlags, "ENABLE_DETERMINISTIC_EXTRACTION", False) or is_word_problem_mode:

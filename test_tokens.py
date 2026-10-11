@@ -1,49 +1,40 @@
-import os
+"""Manual token benchmark script; run explicitly with ``python test_tokens.py``."""
+
+import json
 import re
 import subprocess
-import json
 import time
 
-file_path = "engine/executors/local_llm.py"
-with open(file_path, "r") as f:
-    content = f.read()
 
-for mt in [48, 64, 80, 96]:
-    print(f"\n==========================================")
-    print(f"=== Testing max_tokens={mt} ===")
-    print(f"==========================================")
-    new_content = re.sub(r'max_tokens = min\(max_tokens, \d+\)', f'max_tokens = min(max_tokens, {mt})', content)
-    with open(file_path, "w") as f:
-        f.write(new_content)
-    
-    start = time.time()
-    res = subprocess.run(["python", "run_experiments.py"], capture_output=True, text=True)
-    duration = time.time() - start
-    
-    print(f"\nTotal Execution Time: {duration:.2f}s")
-    
-    # Parse telemetry for inference latency
+def main() -> None:
+    file_path = "engine/executors/local_llm.py"
+    with open(file_path, "r", encoding="utf-8") as source:
+        original = source.read()
     try:
-        with open("output/telemetry.json", "r") as f:
-            telemetry = json.load(f)
-            
-        print("\nTelemetry:")
-        for t in telemetry['traces']:
-            if t['task_id'] in ['T01', 'T01b', 'T01c']:
-                print(f"{t['task_id']} Latency: {t['latency_ms']/1000:.2f}s | Route: {t['route']}")
-    except Exception as e:
-        print("Could not read telemetry:", e)
+        for max_tokens in [48, 64, 80, 96]:
+            print(f"\n=== Testing max_tokens={max_tokens} ===")
+            updated = re.sub(
+                r"max_tokens = min\(max_tokens, \d+\)",
+                f"max_tokens = min(max_tokens, {max_tokens})",
+                original,
+            )
+            with open(file_path, "w", encoding="utf-8") as target:
+                target.write(updated)
+            started = time.time()
+            subprocess.run(["python", "run_experiments.py"], check=False)
+            print(f"Total Execution Time: {time.time() - started:.2f}s")
+            try:
+                with open("output/telemetry.json", "r", encoding="utf-8") as report:
+                    telemetry = json.load(report)
+                for trace in telemetry.get("traces", []):
+                    if trace.get("task_id") in ["T01", "T01b", "T01c"]:
+                        print(f"{trace['task_id']} route={trace['route']} latency_ms={trace['latency_ms']}")
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"Could not read telemetry: {exc}")
+    finally:
+        with open(file_path, "w", encoding="utf-8") as target:
+            target.write(original)
 
-    print(f"\nOutputs:")
-    try:
-        with open("output/results.json", "r") as f:
-            results = json.load(f)
-        for r in results:
-            if r['task_id'] in ['T01', 'T01b', 'T01c']:
-                print(f"[{r['task_id']}]: {r['answer']}\n")
-    except Exception as e:
-        print("Could not read results:", e)
 
-# Restore original
-with open(file_path, "w") as f:
-    f.write(content)
+if __name__ == "__main__":
+    main()

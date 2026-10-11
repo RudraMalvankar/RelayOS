@@ -30,3 +30,6 @@ class FeatureFlags:
     ENABLE_SPACY_SINGLE_THREAD = get_flag("ENABLE_SPACY_SINGLE_THREAD", True)
     ENABLE_QUEUE_SLEEP = get_flag("ENABLE_QUEUE_SLEEP", True)
     ENABLE_SINGLETON_VALIDATION = get_flag("ENABLE_SINGLETON_VALIDATION", True)
+    # Semantic embeddings are optional because loading a transformer model can
+    # exceed constrained startup budgets. Structural analysis remains default.
+    ENABLE_SEMANTIC_CLASSIFIER = get_flag("ENABLE_SEMANTIC_CLASSIFIER", False)
