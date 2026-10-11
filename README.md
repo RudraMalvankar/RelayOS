@@ -250,3 +250,27 @@ FILENAME = "gemma-2-2b-it-Q4_K_M.gguf"
 
 ---
 > Architected and Developed by **Rudra Malvankar**
+
+## 🖥️ Local console and API
+
+RelayOS now includes an optional FastAPI service and React developer console. Start
+the backend and frontend in separate terminals:
+
+```powershell
+# Terminal 1: backend API
+python -m uvicorn api:app --host 127.0.0.1 --port 8000
+
+# Terminal 2: React console
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The console uses `http://localhost:8000` by
+default; set `VITE_API_URL` when the API is hosted elsewhere. The backend exposes
+`/api/health`, `/api/providers`, `/api/models`, `/api/tasks`, and `/api/metrics`.
+Provider credentials are read only from environment variables and are never
+returned by the API.
+
+The batch runner remains available with `python main.py` and continues to write
+the grader-compatible files under `output/`.
