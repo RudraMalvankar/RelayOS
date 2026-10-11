@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install test dependencies
-        run: python -m pip install pydantic httpx tenacity fastapi uvicorn pytest
+        run: python -m pip install pydantic httpx tenacity fastapi uvicorn python-dotenv pytest
       - name: Run focused backend tests
         run: python -m pytest -q tests/test_api.py tests/test_config.py tests/test_execution_states.py tests/test_providers.py
 
