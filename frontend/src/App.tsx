@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import relayosLogo from "./assets/relayos-logo.jpg";
 
 type Mode = "automatic" | "local" | "cloud";
 type Task = {
@@ -105,7 +106,18 @@ function App() {
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark" aria-hidden="true">R</span><strong>RelayOS</strong></div>
+      <div className="brand">
+        <span className="brand-mark sr-only" aria-hidden="true">R</span>
+        <img
+          src={relayosLogo}
+          alt="RelayOS"
+          className="brand-logo"
+          width={1024}
+          height={892}
+          loading="eager"
+        />
+        <strong>RelayOS</strong>
+      </div>
       <button className="new-task" onClick={() => { setPrompt(""); setTask(null); setError(""); setBusy(false); }}><Icon name="plus" />New task</button>
       <nav aria-label="Workspace"><span className="nav-label">Workspace</span>
         <a className="active" aria-current="page"><Icon name="console" />Console</a>
