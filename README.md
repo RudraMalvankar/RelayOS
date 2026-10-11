@@ -276,34 +276,203 @@ returned by the API.
 
 The batch runner remains available with `python main.py` and continues to write
 the grader-compatible files under `output/`.
-# Context-Efficient Routing (optional)
+## 🧠 System Design Challenge: TTL-Aware Caching and Model Switching
 
-RelayOS supports an opt-in, shadow-only context-routing policy. Legacy clients
-remain unchanged. Enable it only after supplying trustworthy provider pricing
-and usage metadata; unknown values are reported as inconclusive rather than
-treated as cache hits or zero-cost usage.
+### The Problem We Faced
 
-```env
-CONTEXT_MANAGEMENT_ENABLED=false
-CONTEXT_ROUTING_ENABLED=false
-CONTEXT_ROUTING_SHADOW=true
-SESSION_STORE_PATH=./output/sessions.json
-SESSION_MAX_HISTORY=10
-SESSION_SUMMARY_MAX_CHARS=2000
-ROUTING_CURRENCY=USD
-ROUTING_SAFETY_MARGIN=0.10
-ROUTING_PRICES_JSON='{"fireworks:YOUR_MODEL":{"input_per_million":1.0,"cached_input_per_million":0.25,"cache_write_per_million":1.25,"output_per_million":2.0,"source":"operator"}}'
+RelayOS is designed to route tasks between different AI execution options while balancing cost, quality, and latency. However, **switching between AI models introduces an important caching challenge**.
+
+When a provider caches reusable prompt content, subsequent requests may benefit from that cache. However, the cache may expire after a certain time, and switching providers may prevent reuse of the previous provider's cache.
+
+A router that ignores these factors can underestimate the cost of future requests.
+
+### 🔴 The Four Challenges
+
+**1. Cache Loss During Model Switching**
+
+When switching from Model A to Model B, Model B may need to process the same context again. This can increase token usage and cost.
+
+**2. TTL Expiration**
+
+TTL stands for *Time To Live*. A cached prompt may only remain reusable for a limited period. Returning to Model A does not guarantee that its previous cache still exists.
+
+**3. Different Cache Pricing**
+
+Providers may charge differently for ordinary input tokens, cached input tokens, cache writes, and output tokens. Ignoring these differences can lead to incorrect cost estimates.
+
+**4. Missing or Uncertain Information**
+
+The router may not know whether a cache hit will occur, or it may lack reliable pricing or usage data. Assuming a cache hit or treating missing prices as zero can produce misleading recommendations.
+
+---
+
+### 🔄 Visualizing the Caching Problem
+
+```mermaid
+sequenceDiagram
+    participant R as RelayOS
+    participant A as Model A
+    participant B as Model B
+
+    R->>A: Request 1 with large context
+    A-->>R: Response
+    Note over A: Cache may be created
+
+    R->>B: Request 2 with context
+    B-->>R: Response
+    Note over B: Separate cache may be required
+
+    R->>A: Request 3 later
+    Note over A: Previous cache may be warm or expired
+    A-->>R: Response
 ```
 
-Requests may optionally include `session_id` and `required_quality` (0–1).
-Session records are bounded and store task metadata plus a truncated summary;
-they do not grant filesystem access or persist provider credentials. Shadow
-recommendations are returned as `routing_metadata` with
-`recommendation_applied: false`; the existing router remains authoritative.
-Rates are currency per million tokens and are keyed by provider or provider
-model identifier. No rate defaults are assumed; missing rates produce an
-inconclusive estimates. The estimator can also apply configured retry
-probabilities and reject candidates that exceed a hard latency limit; absent
-measurements remain unknown.
-Run `python -m pytest -q` for the deterministic tests. A production route
-activation is intentionally not implemented automatically.
+The key insight is that model selection should consider the **cost of the ongoing session**, not just the immediate request.
+
+---
+
+### ✅ How RelayOS Tackles These Challenges
+
+RelayOS introduces cache-aware tracking and a context-routing policy to help evaluate model-switching decisions.
+
+#### 1. TTL-Aware Cache Tracking
+
+The cache tracker maintains cache-related state so routing decisions can consider whether previously cached context may still be reusable.
+
+```mermaid
+flowchart TD
+    A[Request uses a model] --> B[Track cache-related state]
+    B --> C{Cache potentially within TTL?}
+
+    C -->|Yes| D[Consider possible cache reuse]
+    C -->|No| E[Do not rely on previous cache]
+
+    D --> F[Estimate candidate cost]
+    E --> F
+
+    F --> G[Pass estimate to routing policy]
+```
+
+**Important:** A cache that may still be valid is not a guaranteed cache hit. Actual provider usage metadata should be used to validate cache behavior wherever available.
+
+#### 2. Provider-Specific Cache Capabilities
+
+RelayOS separates provider cache capabilities from the routing decision logic.
+
+This allows the estimator to account for supported cost categories, such as:
+
+- Ordinary input tokens
+- Cached input tokens
+- Cache-write tokens
+- Output tokens
+
+The estimator uses configured pricing and available usage information instead of assuming that every provider follows the same caching rules.
+
+#### 3. Stay, Switch, or Return Decisions
+
+Rather than blindly selecting the model with the lowest immediate price, RelayOS can evaluate three possible decisions.
+
+```mermaid
+flowchart TD
+    A[New request] --> B[Evaluate candidate models]
+
+    B --> C[Stay on current model]
+    B --> D[Switch to another model]
+    B --> E[Return to previous model]
+
+    C --> F[Compare cost, quality and latency]
+    D --> F
+    E --> F
+
+    F --> G{Reliable data available?}
+
+    G -->|Yes| H[Generate routing recommendation]
+    G -->|No| I[Mark estimate inconclusive]
+
+    H --> J[Shadow mode: report recommendation]
+```
+
+- **Stay:** The current model may be able to reuse its cache.
+- **Switch:** Another model may be more suitable, but context may need to be processed again.
+- **Return:** A previous model may still have a reusable cache, unless it has expired.
+
+The estimator can also account for configured retry probabilities, safety margins, and latency constraints when the required information is available.
+
+#### 4. Handling Unknown Data Safely
+
+RelayOS does not treat missing pricing information as zero cost or assume that an unconfirmed cache hit will occur.
+
+```mermaid
+flowchart TD
+    A[Cache state and pricing data] --> B{Information sufficient?}
+
+    B -->|Yes| C[Calculate cost estimate]
+    B -->|No| D[Mark estimate inconclusive]
+
+    C --> E[Routing recommendation]
+    D --> F[Do not assume zero cost]
+    D --> G[Do not assume cache hit]
+```
+
+This makes cost estimates more transparent and avoids false confidence.
+
+#### 5. Shadow-Mode Routing
+
+The context-routing policy supports shadow mode, allowing RelayOS to evaluate recommendations without automatically changing the existing router's decision.
+
+In this mode:
+
+1. The existing router remains responsible for execution.
+2. The context-routing policy generates a recommendation when sufficient data is available.
+3. The recommendation is exposed through `routing_metadata`.
+4. `recommendation_applied` remains `false`.
+5. The estimates can be compared with actual usage before considering live routing changes.
+
+This allows the team to evaluate the policy before enabling it to influence production decisions.
+
+---
+
+### 📊 Challenge vs. Solution
+
+| Challenge | RelayOS approach |
+|---|---|
+| Switching may lose cache reuse | Track cache-related state and estimate switching costs |
+| Cache may expire | Consider TTL when evaluating possible cache reuse |
+| Providers have different cache behavior | Represent provider-specific cache capabilities |
+| Cache writes and reads may have different prices | Include supported token-cost categories in estimates |
+| Pricing or usage data is missing | Mark estimates inconclusive instead of assuming zero cost |
+| Routing recommendations may be inaccurate | Use shadow mode before considering live activation |
+
+---
+
+### 💡 Future Enhancement: Mem0 for Compact Context
+
+**Proposed future idea — Mem0 is not claimed to be integrated into the current implementation.**
+
+Provider caching and compact memory solve different problems:
+
+- **Caching** may reduce the cost of reusing compatible prompt content.
+- **Summarization** reduces the amount of conversation history sent to a model.
+- **Mem0-style memory** could retrieve only the relevant information from previous interactions instead of sending the entire conversation repeatedly.
+
+#### Proposed Architecture
+
+```mermaid
+flowchart TD
+    A[Conversation history] --> B[Extract useful information]
+    B --> C[Store compact memories]
+
+    D[New request] --> E[Retrieve relevant memories]
+    C --> E
+
+    E --> F[Build compact context]
+    F --> G[Cache-aware routing]
+    G --> H[Execute task]
+    H --> I[Measure quality, cost and latency]
+```
+
+A future Mem0 integration could help RelayOS reduce repeated context transmission while preserving useful information across interactions.
+
+The combined goal is to **send only the context needed for a task, account for possible cache reuse, and select an appropriate execution path based on cost and quality**.
+
+Any Mem0 integration should be evaluated against a baseline for relevance, token savings, retrieval latency, and overall cost.
