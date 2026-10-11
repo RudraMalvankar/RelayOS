@@ -1,0 +1,12 @@
+[
+    {
+        "flag": "ALL_OPTIMIZATIONS",
+        "accuracy": 100.0,
+        "total_tokens": 556,
+        "api_fallbacks": 1,
+        "duration": 0.14196820000006483,
+        "avg_latency": 8675.376453899662,
+        "p95_latency": 34009.9868239995,
+        "local_routes": 4
+    }
+]
