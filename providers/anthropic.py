@@ -3,6 +3,8 @@
 from typing import Optional
 
 from .base import ProviderError, ProviderResponse
+from core.audit import sdk_request
+from core.context_routing import normalize_provider_usage
 
 
 class AnthropicProvider:
@@ -14,7 +16,7 @@ class AnthropicProvider:
         except ImportError as exc:
             raise ProviderError(self.name, "provider_unavailable", "anthropic package is not installed") from exc
         try:
-            self.client = AsyncAnthropic(api_key=api_key, timeout=timeout)
+            self.client = AsyncAnthropic(api_key=api_key, timeout=timeout, max_retries=0)
         except Exception as exc:
             raise ProviderError(self.name, "provider_initialization", "Anthropic client initialization failed", False) from exc
 
@@ -23,18 +25,21 @@ class AnthropicProvider:
             kwargs = {"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": prompt}]}
             if timeout is not None:
                 kwargs["timeout"] = timeout
-            response = await self.client.messages.create(**kwargs)
+            response = await sdk_request(self.name, model, lambda: self.client.messages.create(**kwargs))
             blocks = getattr(response, "content", []) or []
             text = "".join(getattr(block, "text", "") for block in blocks).strip()
             if not text:
                 raise ProviderError(self.name, "empty_response", "Anthropic returned an empty response", True)
-            usage = getattr(response, "usage", None)
+            usage = normalize_provider_usage(response, self.name)
             return ProviderResponse(
                 provider=self.name,
                 model=model,
                 text=text,
                 input_tokens=getattr(usage, "input_tokens", None),
                 output_tokens=getattr(usage, "output_tokens", None),
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                usage_source=usage.source,
                 finish_reason=getattr(response, "stop_reason", None),
             )
         except ProviderError:

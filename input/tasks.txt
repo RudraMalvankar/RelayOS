@@ -1,0 +1,7 @@
+---TASK---
+task_id: math-001
+Calculate 125 * 48.
+---TASK---
+task_id: api-001
+Explain an API in two sentences.
+Use plain language.

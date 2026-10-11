@@ -9,17 +9,17 @@ class DAGNode:
         self.context = context
         self.dependencies: List['DAGNode'] = []
         self.result: ExecutionResult = None
-        
+
     def add_dependency(self, node: 'DAGNode'):
         self.dependencies.append(node)
 
 class DAGEngine:
     def __init__(self):
         self.nodes = []
-        
+
     def add_node(self, node: DAGNode):
         self.nodes.append(node)
-        
+
     async def execute_graph(self):
         """
         Executes the DAG using an asynchronous topological sort.
@@ -27,33 +27,41 @@ class DAGEngine:
         pending = set(self.nodes)
         completed = set()
         running_tasks = {}
-        
-        while pending or running_tasks:
-            # Find nodes ready to run (all dependencies met)
-            ready_nodes = [
-                n for n in pending 
-                if all(d in completed for d in n.dependencies)
-            ]
-            
-            for node in ready_nodes:
-                pending.remove(node)
-                task = asyncio.create_task(node.executable(node))
-                running_tasks[task] = node
-                
-            if not running_tasks:
-                if pending:
-                    raise RuntimeError("DAG Deadlock detected!")
-                break
-                
-            # Wait for at least one task to finish
-            done, _ = await asyncio.wait(
-                running_tasks.keys(), 
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            for task in done:
-                node = running_tasks.pop(task)
-                node.result = task.result()
-                completed.add(node)
-                
+
+        try:
+            while pending or running_tasks:
+                # Find nodes ready to run (all dependencies met)
+                ready_nodes = [
+                    n for n in pending
+                    if all(d in completed for d in n.dependencies)
+                ]
+
+                for node in ready_nodes:
+                    pending.remove(node)
+                    task = asyncio.create_task(node.executable(node))
+                    running_tasks[task] = node
+
+                if not running_tasks:
+                    if pending:
+                        raise RuntimeError("DAG Deadlock detected!")
+                    break
+
+                # Wait for at least one task to finish
+                done, _ = await asyncio.wait(
+                    running_tasks.keys(),
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in done:
+                    node = running_tasks.pop(task)
+                    node.result = task.result()
+                    completed.add(node)
+
+        finally:
+            # Cancellation must reach spawned executors before reports are finalized.
+            for task in running_tasks:
+                if not task.done():
+                    task.cancel()
+            if running_tasks:
+                await asyncio.gather(*running_tasks, return_exceptions=True)
         return [n.result for n in self.nodes]

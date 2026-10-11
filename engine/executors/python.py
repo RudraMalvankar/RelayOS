@@ -65,7 +65,7 @@ class MathSandbox:
             has_only_allowed_math = not re.search(r'[a-z]', expr, re.IGNORECASE) or bool(
                 re.match(r'^(?:math\.)?(sqrt|sin|cos|tan|log|log10|pow|abs)\s*\(', expr, re.IGNORECASE)
             )
-            if expr and has_only_allowed_math and not re.fullmatch(r'[\d\.\s]+', expr):
+            if expr and has_only_allowed_math and not re.search(r'[a-z]', text_only, re.IGNORECASE) and not re.fullmatch(r'[\d\.\s]+', expr):
                 return expr
                 
         if getattr(FeatureFlags, "ENABLE_DETERMINISTIC_EXTRACTION", False) or is_word_problem_mode:
@@ -85,6 +85,8 @@ class MathSandbox:
                     
             # T02b: A recipe requires 3/4 cup of sugar for 12 cookies. How much sugar is needed for 30 cookies? If sugar costs $2.40 per cup, what is the total cost of sugar for 30 cookies?
             if "recipe" in prompt.lower() and "cookies" in prompt.lower() and "costs" in prompt.lower():
+                if prompt.count("?") > 1:
+                    return ""  # A scalar expression cannot answer multiple requested quantities.
                 frac_match = re.search(r'(\d+)/(\d+)', prompt)
                 frac_val = f"({frac_match.group(1)}/{frac_match.group(2)})" if frac_match else "0"
                 
@@ -123,7 +125,13 @@ class MathSandbox:
                 raise ZeroDivisionError("Division by zero")
             if isinstance(node.op, ast.Pow) and abs(right) > settings.math_max_exponent:
                 raise ValueError("exponent exceeds configured limit")
-            return cls.OPERATORS[type(node.op)](left, right)
+            if isinstance(node.op, ast.Pow) and abs(left) > 1 and right > 0:
+                if right * math.log10(abs(left)) > math.log10(settings.math_max_result_magnitude):
+                    raise ValueError("power exceeds configured numeric limits")
+            result = cls.OPERATORS[type(node.op)](left, right)
+            if isinstance(result, complex) or abs(result) > settings.math_max_result_magnitude:
+                raise ValueError("intermediate result exceeds configured numeric limits")
+            return result
         elif isinstance(node, ast.UnaryOp):
             if type(node.op) not in cls.OPERATORS:
                 raise TypeError(f"Unsupported unary operator: {type(node.op)}")
@@ -134,7 +142,8 @@ class MathSandbox:
                 func = cls.MATH_FUNCTIONS[node.func.id]
                 args = [cls._eval_node(arg) for arg in node.args]
                 return func(*args)
-            elif isinstance(node.func, ast.Attribute) and node.func.attr in cls.MATH_FUNCTIONS:
+            elif (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id == "math" and node.func.attr in cls.MATH_FUNCTIONS):
                 func = cls.MATH_FUNCTIONS[node.func.attr]
                 args = [cls._eval_node(arg) for arg in node.args]
                 return func(*args)
@@ -188,11 +197,13 @@ class PythonExecutor(BaseExecutor):
                 error_message="No deterministic expression could be extracted",
             )
             
+        error_message = None
         try:
             logger.info(f"Task {context.request.task_id}: Executing math in AST Sandbox -> {equation}")
             answer = MathSandbox.evaluate(equation)
         except Exception as exc:
             answer = "" # Trigger API fallback
+            error_message = str(exc)
             
         return ExecutionResult(
             task_id=context.request.task_id,
@@ -201,5 +212,5 @@ class PythonExecutor(BaseExecutor):
             state=ExecutionState.SUCCESS if answer else ExecutionState.FAILED_RETRYABLE,
             fallback_triggered=(answer == ""),
             error_code=None if answer else "math_error",
-            error_message=None if answer else str(exc),
+            error_message=error_message,
         )

@@ -6,6 +6,7 @@ from core.logger import setup_logger
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from providers.base import ProviderError, ProviderResponse
+from core.audit import provider_request, capture_usage
 
 logger = setup_logger("fireworks_executor")
 
@@ -37,12 +38,22 @@ class FireworksExecutor(BaseExecutor):
         retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError))
     )
     async def _post_chat(self, payload: dict) -> httpx.Response:
-        response = await self.client.post("/chat/completions", json=payload)
-        response.raise_for_status()
-        return response
+        with provider_request("fireworks", payload["model"]) as entry:
+            response = await self.client.post("/chat/completions", json=payload)
+            entry["status_code"] = response.status_code
+            try:
+                capture_usage(entry, response.json(), "fireworks")
+            except ValueError:
+                pass
+            response.raise_for_status()
+            return response
 
     async def execute(self, context: TaskContext) -> ExecutionResult:
         model = self._select_model(context)
+        if not settings.fireworks_api_key:
+            return ExecutionResult(task_id=context.request.task_id, answer="", model=model,
+                route_taken=ExecutionRoute.FIREWORKS, state=ExecutionState.FAILED_FINAL,
+                fallback_triggered=True, error_code="provider_unavailable")
         
         from config import FeatureFlags
         if FeatureFlags.ENABLE_SHORT_FIREWORKS_PROMPTS:
@@ -115,6 +126,7 @@ class FireworksExecutor(BaseExecutor):
                 task_id=context.request.task_id,
                 answer=answer,
                 route_taken=ExecutionRoute.FIREWORKS,
+                model=model,
                 state=ExecutionState.FAILED_RETRYABLE,
                 fallback_triggered=True,
                 fireworks_tokens=tokens,
@@ -130,6 +142,7 @@ class FireworksExecutor(BaseExecutor):
                 task_id=context.request.task_id,
                 answer="",
                 route_taken=ExecutionRoute.FIREWORKS,
+                model=model,
                 state=ExecutionState.FAILED_RETRYABLE,
                 fallback_triggered=True,
                 fireworks_tokens=tokens,
@@ -143,6 +156,7 @@ class FireworksExecutor(BaseExecutor):
             task_id=context.request.task_id,
             answer=answer,
             route_taken=ExecutionRoute.FIREWORKS,
+            model=model,
             state=ExecutionState.SUCCESS,
             fireworks_tokens=tokens,
             input_tokens=input_tokens,

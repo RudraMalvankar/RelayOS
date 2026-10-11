@@ -37,6 +37,9 @@ class ProviderResponse:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     finish_reason: Optional[str] = None
+    cached_input_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    usage_source: str = "unknown"
 
 
 class ProviderError(RuntimeError):

@@ -36,6 +36,8 @@ from engine.executors.cloud import CloudProviderExecutor
 from engine.executors.spacy_ner import SpacyNERExecutor
 from core.logger import setup_logger
 
+from core.audit import active_audit, new_audit, audit_scope, execute_recorded, decision, validation
+
 logger = setup_logger("RelayOS_main")
 
 class RelayOSOrchestrator:
@@ -77,14 +79,14 @@ class RelayOSOrchestrator:
     async def _execute_route(self, context: TaskContext) -> ExecutionResult:
         route = context.route
         if route == ExecutionRoute.FIREWORKS:
-            return await self.api_exec.execute(context)
+            return await execute_recorded(self.api_exec, context, "fireworks")
         if route == ExecutionRoute.OPENAI:
-            return await self.openai_exec.execute(context)
+            return await execute_recorded(self.openai_exec, context, "openai")
         if route == ExecutionRoute.ANTHROPIC:
-            return await self.anthropic_exec.execute(context)
+            return await execute_recorded(self.anthropic_exec, context, "anthropic")
         if route == ExecutionRoute.LOCAL_LLM:
-            return await self.local_exec.execute(context)
-        return await self.python_exec.execute(context)
+            return await execute_recorded(self.local_exec, context, "local_llm")
+        return await execute_recorded(self.python_exec, context, "python")
             
     async def _execute_single_route(self, context: TaskContext) -> ExecutionResult:
         """Helper to execute a single atomic task."""
@@ -93,10 +95,10 @@ class RelayOSOrchestrator:
         
         from config import FeatureFlags
         if context.category and context.category.value == "ner" and FeatureFlags.ENABLE_SPACY_NER and self.spacy_exec:
-            result = await self.spacy_exec.execute(context)
+            result = await execute_recorded(self.spacy_exec, context, "spacy")
             if not result.fallback_triggered:
-                final_result = ResultValidator.sanitize(result, context.category)
-                if ConfidenceEngine.evaluate(final_result, context):
+                final_result = self._sanitize(result, context)
+                if self._confident(final_result, context):
                     final_result.fallback_triggered = False
                     return final_result
                 else:
@@ -108,10 +110,10 @@ class RelayOSOrchestrator:
             if (cat_val == "sentiment" and FeatureFlags.ENABLE_LOCAL_SENTIMENT_QWEN) or \
                (cat_val == "summarization" and FeatureFlags.ENABLE_LOCAL_SUMMARIZATION_QWEN):
                 try:
-                    local_result = await self.local_exec.execute(context)
+                    local_result = await execute_recorded(self.local_exec, context, "local_llm")
                     if not local_result.fallback_triggered:
-                        final_result = ResultValidator.sanitize(local_result, context.category)
-                        if ConfidenceEngine.evaluate(final_result, context):
+                        final_result = self._sanitize(local_result, context)
+                        if self._confident(final_result, context):
                             final_result.fallback_triggered = False
                             return final_result
                         else:
@@ -125,19 +127,19 @@ class RelayOSOrchestrator:
                 fallback_triggered = True
                 context.failed_attempts += 1
                 context.route = ExecutionRoute.FIREWORKS
-                result = await self.api_exec.execute(context)
+                result = await execute_recorded(self.api_exec, context, "fireworks")
         else:
-            result = await self.python_exec.execute(context)
+            result = await execute_recorded(self.python_exec, context, "python")
             if result.fallback_triggered and context.category.value == "math" and self.local_exec.is_available():
                 ans = await self.local_exec.math_extraction_fallback(context.request.prompt)
                 if ans:
                     result.answer = str(ans)
                     result.fallback_triggered = False
             
-        final_result = ResultValidator.sanitize(result, context.category)
+        final_result = self._sanitize(result, context)
         
         # Fallback Loop
-        if final_result.state != ExecutionState.SUCCESS or not ConfidenceEngine.evaluate(final_result, context):
+        if final_result.state != ExecutionState.SUCCESS or not self._confident(final_result, context):
             fallback_triggered = True
             logger.warning(f"Task {context.request.task_id}: Low confidence in {route.value}. Recalculating route.")
             context.failed_attempts += 1
@@ -145,12 +147,53 @@ class RelayOSOrchestrator:
             
             result = await self._execute_route(context)
                 
-            final_result = ResultValidator.sanitize(result, context.category)
-            
+            final_result = self._sanitize(result, context)
+            if not self._confident(final_result, context) or final_result.validation_passed is False:
+                final_result.state = ExecutionState.FAILED_FINAL
+                final_result.error_code = final_result.error_code or "validation_failed"
+                validation(final_result, context, False)
+
         final_result.fallback_triggered = fallback_triggered
         return final_result
 
+    @staticmethod
+    def _sanitize(result, context):
+        result = ResultValidator.sanitize(result, context.category)
+        validation(result, context)
+        return result
+
+    @staticmethod
+    def _confident(result, context):
+        passed = ConfidenceEngine.evaluate(result, context)
+        validation(result, context, passed)
+        return passed
+
     async def process_task(self, request: TaskRequest) -> ExecutionResult:
+        import time
+        audit = active_audit.get()
+        audit = audit if audit is not None else new_audit(request.task_id)
+        started = time.perf_counter()
+        with audit_scope(audit):
+            try:
+                result = await self._process_task(request.model_copy(deep=True))
+                successful = [a for a in audit["attempts"] if a["outcome"] in {"success", "fallback_success"} and a.get("validation_passed") is not False]
+                routes = list(dict.fromkeys(a["route"] for a in successful))
+                audit["final_routes"] = routes if result.state in {ExecutionState.SUCCESS, ExecutionState.FALLBACK_SUCCESS} else []
+                audit.update(state=result.state.value, final_route=(routes[0] if len(routes) == 1 else "mixed" if routes else None) if audit["final_routes"] else None,
+                             validation_passed=result.validation_passed, routing_metadata=result.routing_metadata,
+                             error_code=result.error_code)
+                result.routing_metadata = result.routing_metadata or {}
+                result.routing_metadata["run_id"] = audit["run_id"]
+                return result
+            except BaseException as exc:
+                audit.update(state="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed_final",
+                             error_code=type(exc).__name__, final_route=None, validation_passed=False)
+                raise
+            finally:
+                audit["latency_ms"] = (time.perf_counter() - started) * 1000
+                TelemetryService.get_instance().record_audit(audit)
+
+    async def _process_task(self, request: TaskRequest) -> ExecutionResult:
         import time
         start_time = time.perf_counter()
         
@@ -162,34 +205,20 @@ class RelayOSOrchestrator:
         context_package = None
         if request.session_id and settings.context_management_enabled:
             previous = JsonSessionStore(settings.session_store_path, settings.session_max_history, settings.session_summary_max_chars).get(request.session_id) or {}
+            summary = previous.get("summary", "") if isinstance(previous.get("summary"), str) else ""
+            history = previous.get("history", [])
+            if isinstance(history, list) and history:
+                summary += "\nRECENT OUTCOMES:\n" + json.dumps(history[-settings.session_max_history:])[:settings.session_summary_max_chars]
             options = request.context_options if isinstance(request.context_options, dict) else {}
             context_package = ContextBuilder(
                 settings.repository_root,
                 max_chars=settings.context_max_chars,
                 max_files=settings.context_max_files,
                 max_file_chars=settings.context_max_file_chars,
-            ).build(request.prompt, previous.get("summary", ""), options.get("file_paths", []))
+            ).build(request.prompt, summary, options.get("file_paths", []))
             request.prompt = context_package.text
-        shadow_recommendation = None
-        if request.session_id and settings.context_routing_enabled:
-            # Usage and prices are intentionally unknown until provider metadata
-            # or operator-supplied rates exist; this cannot change the route.
-            current_provider = request.provider or "router"
-            candidate_provider = "local_llm" if current_provider != "local_llm" else "fireworks"
-            configured_prices = load_prices(settings.routing_prices_json)
-            current_price = configured_prices.get(f"{current_provider}:{request.model}", configured_prices.get(current_provider, Price()))
-            candidate_price = configured_prices.get(f"{candidate_provider}:{request.model}", configured_prices.get(candidate_provider, Price()))
-            shadow_recommendation = recommend_switch(
-                current_provider=current_provider,
-                candidate_provider=candidate_provider,
-                current_usage=Usage(input_tokens=None, output_tokens=None),
-                candidate_usage=Usage(input_tokens=None, output_tokens=None),
-                current_price=current_price, candidate_price=candidate_price,
-                required_quality=request.required_quality or 0.0,
-                safety_margin=settings.routing_safety_margin,
-                currency=settings.routing_currency,
-            )
-        
+            # Keep category stable, but route using the expanded context's token estimate.
+            context.profile.estimated_input_tokens = context_package.estimated_tokens
         # 2. Plan (Heuristic Decomposition)
         planner = TaskPlanner()
         sub_tasks = planner.plan(context)
@@ -212,6 +241,7 @@ class RelayOSOrchestrator:
                     ctx.request.prompt += dep_text
                     
                 ctx.route = self._requested_route(ctx) or self.decision_engine.route(ctx)
+                decision(ctx)
                 return await self._execute_single_route(ctx)
                 
             node = DAGNode(task_id=st.id, executable=_exec_node, context=st_ctx)
@@ -231,21 +261,26 @@ class RelayOSOrchestrator:
         # 4. Aggregate
         aggregator = ResultAggregator()
         final_result = aggregator.aggregate(request.task_id, sub_results)
-        if shadow_recommendation is not None:
-            final_result.routing_metadata = {
-                "mode": "shadow" if settings.context_routing_shadow else "advisory",
-                "recommendation_applied": False,
-                "recommendation": shadow_recommendation.recommendation,
-                "reason": shadow_recommendation.reason,
-                "current_provider": shadow_recommendation.current_provider,
-                "candidate_provider": shadow_recommendation.candidate_provider,
-                "current_cost": asdict(shadow_recommendation.current_cost),
-                "candidate_cost": asdict(shadow_recommendation.candidate_cost),
-            }
+        # Legacy fields now aggregate every observed transport attempt, not only the last answer.
+        from core.reporting import requests as audit_requests
+        remote_records = audit_requests(active_audit.get() or {})
+        if remote_records:
+            complete = True
+            for field in ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens"):
+                values = [r["usage"].get(field) for r in remote_records]
+                setattr(final_result, field, sum(values) if all(v is not None for v in values) else None)
+                complete = complete and all(v is not None for v in values)
+            final_result.usage_source = "provider" if complete else "partial"
+            final_result.fireworks_tokens = sum((r["usage"].get("input_tokens") or 0) + (r["usage"].get("output_tokens") or 0) for r in remote_records)
+            final_result.retry_count = sum(max(0, len(a["requests"]) - 1) for a in active_audit.get()["attempts"])
+        if request.session_id and settings.context_routing_enabled:
+            from core.reporting import shadow_from_observations
+            final_result.routing_metadata = shadow_from_observations(active_audit.get(), request)
         if context_package is not None:
             final_result.routing_metadata = final_result.routing_metadata or {}
             final_result.routing_metadata["context"] = {
                 "files": list(context_package.files),
+                "cache_events": list(context_package.cache_events),
                 "omitted": list(context_package.omitted),
                 "estimated_tokens": context_package.estimated_tokens,
                 "token_source": context_package.token_source,
@@ -294,104 +329,9 @@ class RelayOSOrchestrator:
         await self.openai_exec.shutdown()
         await self.anthropic_exec.shutdown()
 
-async def main():
-    import sys
-    input_path = "/input/tasks.json"
-    output_path = "/output/results.json"
-    
-    # Local fallback paths for testing outside docker
-    if not os.path.exists("/input"):
-        input_path = "./input/tasks.json"
-        output_path = "./output/results.json"
-        os.makedirs("./input", exist_ok=True)
-        os.makedirs("./output", exist_ok=True)
-        
-        # Create dummy input if missing
-        if not os.path.exists(input_path):
-            with open(input_path, "w") as f:
-                json.dump([{"task_id": "1", "prompt": "What is 2+2?"}], f)
-
-    try:
-        try:
-            with open(input_path, "r") as f:
-                tasks_data = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to read input file: {e}")
-            tasks_data = []
-
-        from config import FeatureFlags
-        orchestrator = RelayOSOrchestrator()
-        semaphore = asyncio.Semaphore(FeatureFlags.FIREWORKS_CONCURRENCY) # Protect memory & API limits
-
-        async def _bounded_process(task_dict):
-            async with semaphore:
-                request = TaskRequest(**task_dict)
-                try:
-                    # AMD Hackathon imposes a strict 30-second time limit per task.
-                    # We enforce a 28-second hard timeout to guarantee we never stall the pipeline.
-                    global_timeout = 70.0 if getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False) else 28.0
-                    return await asyncio.wait_for(
-                        orchestrator.process_task(request),
-                        timeout=global_timeout
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(f"Task {request.task_id} TIMED OUT globally (>28s). Forcing API fallback state.")
-                    return ExecutionResult(
-                        task_id=request.task_id,
-                        answer="",
-                        route_taken=ExecutionRoute.FIREWORKS,
-                        state=ExecutionState.FAILED_FINAL,
-                        fallback_triggered=True,
-                        error_code="task_timeout",
-                        error_message="Task deadline exceeded",
-                    )
-
-        logger.info(f"Starting execution of {len(tasks_data)} tasks.")
-        
-        tasks = [_bounded_process(t) for t in tasks_data]
-        
-        # return_exceptions=True prevents one poisoned task from crashing the entire batch
-        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        results: List[ExecutionResult] = []
-        for i, res in enumerate(raw_results):
-            if isinstance(res, Exception):
-                # Fallback extraction of task_id if possible
-                task_id = str(tasks_data[i].get("task_id", i)) if i < len(tasks_data) else str(i)
-                logger.error(f"Task {task_id} suffered FATAL UNHANDLED ERROR: {res}")
-                results.append(ExecutionResult(
-                    task_id=task_id,
-                    answer="",
-                    route_taken=None,
-                    state=ExecutionState.FAILED_FINAL,
-                    fallback_triggered=True,
-                    error_code="orchestrator_error",
-                    error_message=str(res),
-                ))
-            else:
-                results.append(res)
-        
-        # Format for AMD Grader
-        output_data = [{"task_id": r.task_id, "answer": r.answer} for r in results]
-        
-        try:
-            with open(output_path, "w") as f:
-                json.dump(output_data, f, indent=4)
-            logger.info(f"Successfully wrote {len(output_data)} results to {output_path}")
-            
-            # Dump telemetry
-            from core.config import settings
-            TelemetryService.get_instance().dump_report(settings.telemetry_path)
-        except Exception as e:
-            logger.error(f"Failed to write results: {e}")
-            
-        logger.info("Finished processing.")
-        
-    except Exception as e:
-        logger.critical(f"GLOBAL CRASH: {e}. Writing emergency blank output.")
-        with open(output_path, "w") as f:
-            json.dump([], f)
-        sys.exit(0) # Exit cleanly to ensure Docker runtime doesn't report an internal failure
+async def main(argv=None):
+    from core.batch import cli
+    return await cli(argv)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

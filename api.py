@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from core.audit import audit_scope, new_audit
 from core.config import settings
 from core.telemetry import TelemetryService
 from main import RelayOSOrchestrator
@@ -54,6 +55,7 @@ class _TaskRecord:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     job: Optional[asyncio.Task] = None
+    audit: Optional[dict] = None
 
     def summary(self) -> TaskSummary:
         return TaskSummary(
@@ -128,27 +130,32 @@ def create_app(orchestrator: Any = None) -> FastAPI:
                         app.state.tasks.pop(record.task_id, None)
 
     async def run_task(record: _TaskRecord, request: TaskRequest):
+        queued = time.perf_counter()
+        record.audit = new_audit(record.task_id)
         async with app.state.semaphore:
+            record.audit["queue_wait_ms"] = (time.perf_counter() - queued) * 1000
             record.status = "running"
             record.updated_at = time.time()
-            try:
-                result = await asyncio.wait_for(
-                    (await get_orchestrator()).process_task(request),
-                    timeout=settings.task_timeout_seconds,
-                )
-                record.result = result
-                record.status = result.state.value
-            except asyncio.CancelledError:
-                record.status = "cancelled"
-                raise
-            except asyncio.TimeoutError:
-                record.status = "failed_final"
-                record.error = "Task deadline exceeded"
-            except Exception as exc:
-                record.status = "failed_final"
-                record.error = "Task execution failed"
-            finally:
-                record.updated_at = time.time()
+            with audit_scope(record.audit):
+                try:
+                    result = await asyncio.wait_for(
+                        (await get_orchestrator()).process_task(request),
+                        timeout=settings.task_timeout_seconds,
+                    )
+                    record.result = result
+                    record.status = result.state.value
+                except asyncio.CancelledError:
+                    record.status = "cancelled"
+                    raise
+                except asyncio.TimeoutError:
+                    record.status = "failed_final"
+                    record.error = "Task deadline exceeded"
+                except Exception as exc:
+                    record.status = "failed_final"
+                    record.error = "Task execution failed"
+                finally:
+                    record.updated_at = time.time()
+                    record.audit["state"] = record.status
 
     @app.get("/api/health")
     async def health() -> dict:
@@ -201,6 +208,17 @@ def create_app(orchestrator: Any = None) -> FastAPI:
         if record is None:
             raise HTTPException(status_code=404, detail="Task not found")
         return record.summary()
+
+    @app.get("/api/tasks/{task_id}/audit")
+    async def get_task_audit(task_id: str, _: None = Depends(authorize)):
+        record = app.state.tasks.get(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        from core.reporting import priced_requests
+        from copy import deepcopy
+        audit = deepcopy(record.audit) if record.audit else {"task_id": task_id, "attempts": [], "state": record.status}
+        priced_requests(audit)
+        return audit
 
     @app.post("/api/tasks/{task_id}/cancel", response_model=TaskSummary)
     async def cancel_task(task_id: str, _: None = Depends(authorize)):

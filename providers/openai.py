@@ -3,6 +3,8 @@
 from typing import Optional
 
 from .base import ProviderError, ProviderResponse
+from core.audit import sdk_request
+from core.context_routing import normalize_provider_usage
 
 
 class OpenAIProvider:
@@ -14,7 +16,7 @@ class OpenAIProvider:
         except ImportError as exc:
             raise ProviderError(self.name, "provider_unavailable", "openai package is not installed") from exc
         try:
-            self.client = AsyncOpenAI(api_key=api_key, timeout=timeout)
+            self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=0)
         except Exception as exc:
             raise ProviderError(self.name, "provider_initialization", "OpenAI client initialization failed", False) from exc
 
@@ -23,18 +25,21 @@ class OpenAIProvider:
             kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}]}
             if timeout is not None:
                 kwargs["timeout"] = timeout
-            response = await self.client.chat.completions.create(**kwargs)
+            response = await sdk_request(self.name, model, lambda: self.client.chat.completions.create(**kwargs))
             choice = response.choices[0]
             text = (choice.message.content or "").strip()
             if not text:
                 raise ProviderError(self.name, "empty_response", "OpenAI returned an empty response", True)
-            usage = response.usage
+            usage = normalize_provider_usage(response, self.name)
             return ProviderResponse(
                 provider=self.name,
                 model=model,
                 text=text,
-                input_tokens=getattr(usage, "prompt_tokens", None),
-                output_tokens=getattr(usage, "completion_tokens", None),
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                usage_source=usage.source,
                 finish_reason=getattr(choice, "finish_reason", None),
             )
         except ProviderError:

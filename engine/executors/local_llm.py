@@ -57,7 +57,7 @@ def _worker_main(conn, model_path: str, n_threads: int) -> None:
                 stop=["User:", "user:", "<|im_end|>"],
             )
             answer = response["choices"][0]["message"]["content"].strip()
-            conn.send({"ok": bool(answer), "answer": answer, "latency_ms": (time.perf_counter() - started) * 1000, "error_code": None if answer else "empty_response"})
+            conn.send({"ok": bool(answer), "answer": answer, "usage": response.get("usage"), "latency_ms": (time.perf_counter() - started) * 1000, "error_code": None if answer else "empty_response"})
     except Exception as exc:
         try:
             conn.send({"ok": False, "error_code": "provider_error", "error": str(exc)})
@@ -183,7 +183,11 @@ class LocalLLMExecutor(BaseExecutor):
                 self.worker.state = WorkerState.HEALTHY
                 if not response.get("ok"):
                     return self._failure(context, response.get("error_code", "provider_error"), response.get("error", "Local inference failed"), queue_wait_ms)
-                return ExecutionResult(task_id=context.request.task_id, answer=response["answer"], route_taken=ExecutionRoute.LOCAL_LLM, state=ExecutionState.SUCCESS, queue_wait_ms=queue_wait_ms, latency_ms=response.get("latency_ms"), model=self.model_path)
+                from core.context_routing import normalize_provider_usage
+                usage = normalize_provider_usage(response)
+                return ExecutionResult(task_id=context.request.task_id, answer=response["answer"], route_taken=ExecutionRoute.LOCAL_LLM, state=ExecutionState.SUCCESS, queue_wait_ms=queue_wait_ms, latency_ms=response.get("latency_ms"), model=self.model_path,
+                    input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                    usage_source="relayos" if usage.source == "provider" else "unknown")
             except asyncio.TimeoutError:
                 self.worker.state = WorkerState.COOLDOWN
                 self.worker.terminate()

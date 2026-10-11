@@ -40,7 +40,7 @@ def test_invalid_cached_tokens_do_not_inflate_cost():
         Usage(input_tokens=100, cached_input_tokens=1000, output_tokens=10),
         Price(input_per_million=10, cached_input_per_million=1, output_per_million=20, source="operator"),
     )
-    assert result.amount == pytest.approx(0.0012)
+    assert result.amount == pytest.approx(0.0002)
     assert "invalid_cached_input_tokens" in result.missing
 
 

@@ -39,6 +39,7 @@ class TelemetryService:
         if cls._instance is None:
             cls._instance = super(TelemetryService, cls).__new__(cls)
             cls._instance.traces = []
+            cls._instance.audits = []
             cls._instance.counters = {
                 "total_tasks": 0,
                 "api_fallbacks": 0,
@@ -90,10 +91,23 @@ class TelemetryService:
         except Exception:
             pass
 
+    def record_audit(self, audit):
+        from core.reporting import priced_requests, requests
+        priced_requests(audit)
+        self.audits.append(audit)
+        del self.audits[:-max(1, settings.max_task_records)]
+        records = requests(audit)
+        self.counters["external_requests"] = self.counters.get("external_requests", 0) + sum(r["external_request_made"] for r in records)
+        self.counters["requests_with_unknown_usage"] = self.counters.get("requests_with_unknown_usage", 0) + sum(
+            r["usage"].get("input_tokens") is None or r["usage"].get("output_tokens") is None for r in records)
+        self.counters["api_cost_incomplete_requests"] = self.counters.get("api_cost_incomplete_requests", 0) + sum(
+            r["cost"]["status"] != "measured" for r in records)
+
     def dump_report(self, path: str):
         report = {
             "summary": self.counters,
-            "traces": [asdict(t) for t in self.traces]
+            "traces": [asdict(t) for t in self.traces],
+            "audits": self.audits,
         }
         try:
             import os

@@ -10,10 +10,11 @@ test("failed_retryable result with empty answer shows the error, not 'Waiting'",
   await page.route(`${API}/api/tasks`, (r) => r.fulfill({ status: 202, json: { task_id: "r1", status: "queued", created_at: 0, updated_at: 0 } }));
   await page.route(`${API}/api/tasks/r1`, (r) => r.fulfill({ json: { task_id: "r1", status: "failed_retryable", result, created_at: 0, updated_at: 1 } }));
   await page.goto("/");
+  await page.getByRole("button", { name: /New task/ }).click();
   await page.getByRole("textbox").fill("x");
   await page.getByRole("button", { name: /Run task/ }).click();
-  await expect(page.locator(".state")).toHaveText("failed_retryable");
-  await expect(page.getByText("Waiting for an execution result…")).toHaveCount(0);
-  await expect(page.locator(".result-body")).toContainText("provider_error");
+  await expect(page.locator(".trace-pane .status")).toHaveText("failed_retryable");
+  await expect(page.getByText("Execution in progress")).toHaveCount(0);
+  await expect(page.locator(".failure")).toContainText("provider_error");
   await expect(page.getByRole("button", { name: /Run task/ })).toBeEnabled();
 });

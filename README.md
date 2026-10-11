@@ -1,5 +1,7 @@
 # RelayOS: The Cost-Aware AI Operating System 🚀
 
+> Current verification: see [run and accounting guide](docs/RUN_AUDIT.md) and [executed checks](docs/VERIFICATION.md). Historical accuracy, savings, latency and production-readiness claims below are not verified by this change; treat improvements as hypotheses until measured.
+
 **AMD Developer Hackathon (Act II) - Track 1: General-Purpose AI Agent**
 
 RelayOS is a deterministic, enterprise-grade AI Orchestration Engine. Its core mandate is to maximize accuracy on the AMD Hackathon Track 1 evaluation set while driving proprietary Fireworks API token consumption as close to absolute zero as mathematically possible.
@@ -290,7 +292,7 @@ SESSION_MAX_HISTORY=10
 SESSION_SUMMARY_MAX_CHARS=2000
 ROUTING_CURRENCY=USD
 ROUTING_SAFETY_MARGIN=0.10
-ROUTING_PRICES_JSON='{"fireworks":{"input_per_million":1.0,"cached_input_per_million":0.25,"cache_write_per_million":1.25,"output_per_million":2.0,"source":"operator"}}'
+ROUTING_PRICES_JSON='{"fireworks:YOUR_MODEL":{"input_per_million":1.0,"cached_input_per_million":0.25,"cache_write_per_million":1.25,"output_per_million":2.0,"source":"operator"}}'
 ```
 
 Requests may optionally include `session_id` and `required_quality` (0–1).
