@@ -16,7 +16,7 @@ import asyncio
 import json
 from typing import List
 from models.schemas import TaskRequest, TaskContext, ExecutionResult
-from models.enums import ExecutionRoute
+from models.enums import ExecutionRoute, ExecutionState
 from pipeline.analyzer import PromptAnalyzer
 from pipeline.classifier import TaskClassifier
 from pipeline.complexity import ComplexityEstimator
@@ -236,9 +236,12 @@ async def main():
                     logger.error(f"Task {request.task_id} TIMED OUT globally (>28s). Forcing API fallback state.")
                     return ExecutionResult(
                         task_id=request.task_id,
-                        answer="Timeout Error",
+                        answer="",
                         route_taken=ExecutionRoute.FIREWORKS,
-                        fallback_triggered=True
+                        state=ExecutionState.FAILED_FINAL,
+                        fallback_triggered=True,
+                        error_code="task_timeout",
+                        error_message="Task deadline exceeded",
                     )
 
         logger.info(f"Starting execution of {len(tasks_data)} tasks.")
@@ -255,10 +258,13 @@ async def main():
                 task_id = str(tasks_data[i].get("task_id", i)) if i < len(tasks_data) else str(i)
                 logger.error(f"Task {task_id} suffered FATAL UNHANDLED ERROR: {res}")
                 results.append(ExecutionResult(
-                    task_id=task_id, 
-                    answer="Fatal Orchestrator Error", 
-                    route_taken=None, 
-                    fallback_triggered=True
+                    task_id=task_id,
+                    answer="",
+                    route_taken=None,
+                    state=ExecutionState.FAILED_FINAL,
+                    fallback_triggered=True,
+                    error_code="orchestrator_error",
+                    error_message=str(res),
                 ))
             else:
                 results.append(res)

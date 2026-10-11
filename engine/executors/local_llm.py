@@ -207,8 +207,8 @@ class LocalLLMExecutor(BaseExecutor):
                 task_id=context.request.task_id,
                 answer=answer,
                 route_taken=ExecutionRoute.LOCAL_LLM,
-                tokens=max_tokens,
-                latency=latency
+                fireworks_tokens=0,
+                latency_ms=latency * 1000.0
             )
         except asyncio.TimeoutError:
             if getattr(FeatureFlags, "ENABLE_LONG_LOCAL_QUEUE", False):

@@ -20,3 +20,9 @@ class ExecutionRoute(str, Enum):
     PYTHON = "python"
     LOCAL_LLM = "local_llm"
     FIREWORKS = "fireworks"
+
+class ExecutionState(str, Enum):
+    SUCCESS = "success"
+    FALLBACK_SUCCESS = "fallback_success"
+    FAILED_RETRYABLE = "failed_retryable"
+    FAILED_FINAL = "failed_final"

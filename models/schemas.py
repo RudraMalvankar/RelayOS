@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional, Any, List, Tuple
-from .enums import TaskCategory, ComplexityLevel, ExecutionRoute
+from .enums import TaskCategory, ComplexityLevel, ExecutionRoute, ExecutionState
 
 class PromptProfile(BaseModel):
     word_count: int
@@ -33,5 +33,14 @@ class ExecutionResult(BaseModel):
     task_id: str
     answer: str
     route_taken: Optional[ExecutionRoute] = None
+    model: Optional[str] = None
+    state: ExecutionState = ExecutionState.SUCCESS
     fireworks_tokens: int = 0
     fallback_triggered: bool = False
+    confidence: Optional[float] = None
+    validation_passed: Optional[bool] = None
+    retry_count: int = 0
+    latency_ms: Optional[float] = None
+    queue_wait_ms: Optional[float] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None

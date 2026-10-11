@@ -1,6 +1,6 @@
 from .base import BaseExecutor
 from models.schemas import TaskContext, ExecutionResult
-from models.enums import ExecutionRoute
+from models.enums import ExecutionRoute, ExecutionState
 from core.config import settings
 from core.logger import setup_logger
 import httpx
@@ -91,12 +91,23 @@ class FireworksExecutor(BaseExecutor):
                 
         except Exception as e:
             logger.error(f"Task {context.request.task_id}: Fireworks API failed - {e}")
-            answer = "API Error"
+            answer = ""
             tokens = 0
+            return ExecutionResult(
+                task_id=context.request.task_id,
+                answer=answer,
+                route_taken=ExecutionRoute.FIREWORKS,
+                state=ExecutionState.FAILED_RETRYABLE,
+                fallback_triggered=True,
+                fireworks_tokens=tokens,
+                error_code="provider_error",
+                error_message=str(e),
+            )
             
         return ExecutionResult(
             task_id=context.request.task_id,
             answer=answer,
             route_taken=ExecutionRoute.FIREWORKS,
+            state=ExecutionState.SUCCESS,
             fireworks_tokens=tokens
         )
