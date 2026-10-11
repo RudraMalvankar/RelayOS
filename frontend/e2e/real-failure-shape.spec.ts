@@ -2,7 +2,7 @@
 // (observed manually: state=failed_retryable, answer="", error_code=provider_error).
 import { expect, test } from "@playwright/test";
 
-const API = "http://localhost:8000";
+const API = "http://127.0.0.1:8006";
 
 test("failed_retryable result with empty answer shows the error, not 'Waiting'", async ({ page }) => {
   const result = { task_id: "r1", answer: "", state: "failed_retryable", route_taken: "fireworks", fireworks_tokens: 0,

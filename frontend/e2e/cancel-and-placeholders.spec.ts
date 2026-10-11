@@ -18,11 +18,11 @@ test("Cancel is not offered when idle", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 });
 
-test("unsupported controls are honestly disabled", async ({ page }) => {
+test("execution modes are available and unsupported navigation remains disabled", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: /Automatic/ })).toBeEnabled();
-  await expect(page.getByRole("button", { name: /Local/ })).toBeDisabled();
-  await expect(page.getByRole("button", { name: /Cloud/ })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /Local/ })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /Cloud/ })).toBeEnabled();
   for (const name of ["Task history", "Benchmarks"]) {
     await expect(page.getByText(name).first()).toHaveAttribute("aria-disabled", "true");
   }

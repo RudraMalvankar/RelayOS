@@ -1,7 +1,7 @@
 // Browser tests with a MOCKED API (page.route) to force error/edge responses.
 import { expect, test } from "@playwright/test";
 
-const API = "http://localhost:8000";
+const API = "http://127.0.0.1:8006";
 
 test("health offline shows 'API offline' and later recovers", async ({ page }) => {
   let up = false;

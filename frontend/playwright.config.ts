@@ -12,20 +12,21 @@ export default defineConfig({
   workers: 1,
   reporter: [["list"]],
   use: {
-    baseURL: "http://localhost:4173",
+    baseURL: "http://localhost:4174",
     launchOptions: { executablePath, args: ["--no-sandbox"] },
   },
   webServer: [
     {
       // Real FastAPI app + FAKE orchestrator (no AI pipeline).
-      command: "python3 ../tests/e2e_support/fake_server.py",
-      url: "http://127.0.0.1:8000/api/health",
+      command: "python ../tests/e2e_support/fake_server.py",
+      url: "http://127.0.0.1:8006/api/health",
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,
     },
     {
-      command: "npm run build && npm run preview -- --port 4173 --strictPort",
-      url: "http://localhost:4173",
+      command: "set VITE_API_URL=http://127.0.0.1:8006&& npm run build && npm run preview -- --port 4174 --strictPort",
+      url: "http://localhost:4174",
+      env: { VITE_API_URL: "http://127.0.0.1:8006" },
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
