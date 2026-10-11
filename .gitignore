@@ -69,5 +69,6 @@ hackathon-agent/
 # Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo
 
 
