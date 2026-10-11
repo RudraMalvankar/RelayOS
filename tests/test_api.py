@@ -19,7 +19,8 @@ def test_health_and_provider_status_are_safe():
 
     assert client.get("/api/health").json()["status"] == "ok"
     providers = client.get("/api/providers").json()["providers"]
-    assert set(providers) == {"fireworks", "anthropic", "openai"}
+    assert {provider["name"] for provider in providers} == {"fireworks", "anthropic", "openai"}
+    assert all("secret" not in str(provider) for provider in providers)
 
 
 def test_task_input_limit_is_enforced():

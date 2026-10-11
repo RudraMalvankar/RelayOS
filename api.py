@@ -20,6 +20,7 @@ from core.telemetry import TelemetryService
 from main import RelayOSOrchestrator
 from models.enums import ExecutionState
 from models.schemas import ExecutionResult, TaskRequest
+from providers.registry import ProviderRegistry
 
 
 class TaskCreate(BaseModel):
@@ -106,7 +107,7 @@ def create_app(orchestrator: Any = None) -> FastAPI:
 
     @app.get("/api/providers")
     async def providers() -> dict:
-        return {"providers": settings.provider_status()}
+        return {"providers": ProviderRegistry().public_status()}
 
     @app.get("/api/models")
     async def models() -> dict:
