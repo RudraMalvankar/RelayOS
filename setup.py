@@ -8,6 +8,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "huggingface-hub",
+        "python-dotenv",
         "llama-cpp-python",
         "pydantic",
         "httpx",

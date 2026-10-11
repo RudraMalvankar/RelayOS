@@ -23,6 +23,9 @@ class TaskRequest(BaseModel):
     execution_mode: str = "auto"
     provider: Optional[str] = None
     model: Optional[str] = None
+    session_id: Optional[str] = None
+    required_quality: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    context_options: Optional[dict] = None
 
 class TaskContext(BaseModel):
     request: TaskRequest
@@ -39,6 +42,11 @@ class ExecutionResult(BaseModel):
     model: Optional[str] = None
     state: ExecutionState = ExecutionState.SUCCESS
     fireworks_tokens: int = 0
+    input_tokens: Optional[int] = None
+    cached_input_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    usage_source: str = "unknown"
     fallback_triggered: bool = False
     confidence: Optional[float] = None
     validation_passed: Optional[bool] = None
@@ -48,6 +56,7 @@ class ExecutionResult(BaseModel):
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     fallback_reason: Optional[str] = None
+    routing_metadata: Optional[dict] = None
 
     @model_validator(mode="after")
     def reject_empty_success(self):

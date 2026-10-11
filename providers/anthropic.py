@@ -33,8 +33,8 @@ class AnthropicProvider:
                 provider=self.name,
                 model=model,
                 text=text,
-                input_tokens=getattr(usage, "input_tokens", 0) or 0,
-                output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
                 finish_reason=getattr(response, "stop_reason", None),
             )
         except ProviderError:

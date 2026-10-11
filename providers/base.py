@@ -34,8 +34,8 @@ class ProviderResponse:
     provider: str
     model: str
     text: str
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
     finish_reason: Optional[str] = None
 
 

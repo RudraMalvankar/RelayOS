@@ -76,13 +76,22 @@ class FireworksExecutor(BaseExecutor):
             "max_tokens": max_tokens
         }
         
+        input_tokens = None
+        output_tokens = None
+        tokens = 0
         try:
             logger.info(f"Task {context.request.task_id}: Escalating to Fireworks API ({model})")
             resp = await self._post_chat(payload)
             data = resp.json()
             choice = data["choices"][0]
             answer = choice["message"]["content"].strip()
-            tokens = data.get("usage", {}).get("total_tokens", 0)
+            usage = data.get("usage") or {}
+            input_tokens = usage.get("prompt_tokens")
+            output_tokens = usage.get("completion_tokens")
+            tokens = usage.get("total_tokens")
+            if tokens is None and input_tokens is not None and output_tokens is not None:
+                tokens = input_tokens + output_tokens
+            tokens = tokens or 0
             
             # --- Output Token Validator (Truncation Recovery) ---
             if choice.get("finish_reason") == "length":
@@ -91,7 +100,12 @@ class FireworksExecutor(BaseExecutor):
                 resp2 = await self._post_chat(payload)
                 data2 = resp2.json()
                 answer = data2["choices"][0]["message"]["content"].strip()
-                tokens += data2.get("usage", {}).get("total_tokens", 0)
+                usage2 = data2.get("usage") or {}
+                tokens += usage2.get("total_tokens") or 0
+                if usage2.get("prompt_tokens") is not None:
+                    input_tokens = (input_tokens or 0) + usage2["prompt_tokens"]
+                if usage2.get("completion_tokens") is not None:
+                    output_tokens = (output_tokens or 0) + usage2["completion_tokens"]
                 
         except Exception as e:
             logger.error(f"Task {context.request.task_id}: Fireworks API failed - {e}")
@@ -104,6 +118,9 @@ class FireworksExecutor(BaseExecutor):
                 state=ExecutionState.FAILED_RETRYABLE,
                 fallback_triggered=True,
                 fireworks_tokens=tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                usage_source="provider" if input_tokens is not None or output_tokens is not None else "unknown",
                 error_code="provider_error",
                 error_message="Fireworks request failed",
             )
@@ -116,6 +133,9 @@ class FireworksExecutor(BaseExecutor):
                 state=ExecutionState.FAILED_RETRYABLE,
                 fallback_triggered=True,
                 fireworks_tokens=tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                usage_source="provider" if input_tokens is not None or output_tokens is not None else "unknown",
                 error_code="empty_response",
                 error_message="Fireworks returned an empty response",
             )
@@ -124,7 +144,10 @@ class FireworksExecutor(BaseExecutor):
             answer=answer,
             route_taken=ExecutionRoute.FIREWORKS,
             state=ExecutionState.SUCCESS,
-            fireworks_tokens=tokens
+            fireworks_tokens=tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            usage_source="provider" if input_tokens is not None or output_tokens is not None else "unknown",
         )
 
     async def shutdown(self):
@@ -140,7 +163,7 @@ class FireworksExecutor(BaseExecutor):
             if not text:
                 raise ProviderError(self.name, "empty_response", "Fireworks returned an empty response", True)
             usage = data.get("usage", {})
-            return ProviderResponse(provider=self.name, model=model, text=text, input_tokens=usage.get("prompt_tokens", 0), output_tokens=usage.get("completion_tokens", 0), finish_reason=choice.get("finish_reason"))
+            return ProviderResponse(provider=self.name, model=model, text=text, input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"), finish_reason=choice.get("finish_reason"))
         except ProviderError:
             raise
         except httpx.HTTPStatusError as exc:

@@ -33,7 +33,7 @@ class CloudProviderExecutor(BaseExecutor):
             return ExecutionResult(task_id=context.request.task_id, answer="", route_taken=route, state=ExecutionState.FAILED_FINAL, fallback_triggered=True, error_code="provider_unavailable", error_message=f"{self.provider_name} is not configured")
         try:
             response = await self.adapter.complete(context.request.prompt, model, timeout=settings.task_timeout_seconds)
-            return ExecutionResult(task_id=context.request.task_id, answer=response.text, route_taken=route, model=model, state=ExecutionState.SUCCESS, fireworks_tokens=response.input_tokens + response.output_tokens)
+            return ExecutionResult(task_id=context.request.task_id, answer=response.text, route_taken=route, model=model, state=ExecutionState.SUCCESS, fireworks_tokens=(response.input_tokens or 0) + (response.output_tokens or 0), input_tokens=response.input_tokens, output_tokens=response.output_tokens, usage_source="provider")
         except ProviderError as exc:
             return ExecutionResult(task_id=context.request.task_id, answer="", route_taken=route, model=model, state=ExecutionState.FAILED_RETRYABLE if exc.retryable else ExecutionState.FAILED_FINAL, fallback_triggered=True, error_code=exc.code, error_message="Cloud provider request failed", fallback_reason=exc.code)
 

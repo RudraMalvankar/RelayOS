@@ -274,3 +274,34 @@ returned by the API.
 
 The batch runner remains available with `python main.py` and continues to write
 the grader-compatible files under `output/`.
+# Context-Efficient Routing (optional)
+
+RelayOS supports an opt-in, shadow-only context-routing policy. Legacy clients
+remain unchanged. Enable it only after supplying trustworthy provider pricing
+and usage metadata; unknown values are reported as inconclusive rather than
+treated as cache hits or zero-cost usage.
+
+```env
+CONTEXT_MANAGEMENT_ENABLED=false
+CONTEXT_ROUTING_ENABLED=false
+CONTEXT_ROUTING_SHADOW=true
+SESSION_STORE_PATH=./output/sessions.json
+SESSION_MAX_HISTORY=10
+SESSION_SUMMARY_MAX_CHARS=2000
+ROUTING_CURRENCY=USD
+ROUTING_SAFETY_MARGIN=0.10
+ROUTING_PRICES_JSON='{"fireworks":{"input_per_million":1.0,"cached_input_per_million":0.25,"cache_write_per_million":1.25,"output_per_million":2.0,"source":"operator"}}'
+```
+
+Requests may optionally include `session_id` and `required_quality` (0–1).
+Session records are bounded and store task metadata plus a truncated summary;
+they do not grant filesystem access or persist provider credentials. Shadow
+recommendations are returned as `routing_metadata` with
+`recommendation_applied: false`; the existing router remains authoritative.
+Rates are currency per million tokens and are keyed by provider or provider
+model identifier. No rate defaults are assumed; missing rates produce an
+inconclusive estimates. The estimator can also apply configured retry
+probabilities and reject candidates that exceed a hard latency limit; absent
+measurements remain unknown.
+Run `python -m pytest -q` for the deterministic tests. A production route
+activation is intentionally not implemented automatically.

@@ -24,6 +24,12 @@ class TaskTrace:
     confidence: Optional[float] = None
     queue_wait_ms: Optional[float] = None
     error_code: Optional[str] = None
+    routing_metadata: Optional[dict] = None
+    input_tokens: Optional[int] = None
+    cached_input_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    usage_source: str = "unknown"
 
 class TelemetryService:
     _instance = None
@@ -63,6 +69,16 @@ class TelemetryService:
             if route not in self.counters["routes"]:
                 self.counters["routes"][route] = 0
             self.counters["routes"][route] += 1
+            if trace.routing_metadata:
+                self.counters.setdefault("shadow_recommendations", 0)
+                self.counters["shadow_recommendations"] += 1
+                self.counters.setdefault("shadow_agreement", 0)
+                self.counters.setdefault("shadow_inconclusive", 0)
+                recommendation = trace.routing_metadata.get("recommendation")
+                if recommendation == "inconclusive":
+                    self.counters["shadow_inconclusive"] += 1
+                elif recommendation == "stay" and trace.routing_metadata.get("current_provider") == trace.route:
+                    self.counters["shadow_agreement"] += 1
             
             # Lightweight checkpointing every 10 tasks to prevent total loss on OOM kills
             if self.counters["total_tasks"] % 10 == 0:

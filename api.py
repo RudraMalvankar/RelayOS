@@ -31,6 +31,9 @@ class TaskCreate(BaseModel):
     execution_mode: str = Field(default="auto", pattern="^(auto|local|cloud)$")
     provider: Optional[str] = Field(default=None, pattern="^(fireworks|openai|anthropic|local_llm)$")
     model: Optional[str] = None
+    session_id: Optional[str] = None
+    required_quality: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    context_options: Optional[dict] = None
 
 
 class TaskSummary(BaseModel):
@@ -80,7 +83,7 @@ def create_app(orchestrator: Any = None) -> FastAPI:
         allow_origins=settings.cors_origins_list,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
     app.state.orchestrator = orchestrator
@@ -189,7 +192,7 @@ def create_app(orchestrator: Any = None) -> FastAPI:
                 raise HTTPException(status_code=409, detail="Task ID already exists")
             record = _TaskRecord(task_id=task_id)
             app.state.tasks[task_id] = record
-            record.job = asyncio.create_task(run_task(record, TaskRequest(task_id=task_id, prompt=payload.prompt, execution_mode=payload.execution_mode, provider=payload.provider, model=payload.model)))
+            record.job = asyncio.create_task(run_task(record, TaskRequest(task_id=task_id, prompt=payload.prompt, execution_mode=payload.execution_mode, provider=payload.provider, model=payload.model, session_id=payload.session_id, required_quality=payload.required_quality, context_options=payload.context_options)))
         return record.summary()
 
     @app.get("/api/tasks/{task_id}", response_model=TaskSummary)

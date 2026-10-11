@@ -14,6 +14,7 @@ _apply_cpu_limits()
 
 import asyncio
 import json
+from dataclasses import asdict
 from typing import List
 from models.schemas import TaskRequest, TaskContext, ExecutionResult
 from models.enums import ExecutionRoute, ExecutionState
@@ -26,6 +27,8 @@ from engine.confidence import ConfidenceEngine
 from engine.dag import DAGEngine, DAGNode
 from pipeline.planner import TaskPlanner, ResultAggregator
 from core.telemetry import TelemetryService, TaskTrace
+from core.context_routing import ContextBuilder, JsonSessionStore, Price, Usage, load_prices, recommend_switch
+from core.config import settings
 from engine.executors.python import PythonExecutor
 from engine.executors.fireworks import FireworksExecutor
 from engine.executors.local_llm import LocalLLMExecutor
@@ -156,6 +159,36 @@ class RelayOSOrchestrator:
         context = TaskContext(request=request, profile=profile)
         context.category = profile.primary_category
         context.complexity = ComplexityEstimator.estimate(context)
+        context_package = None
+        if request.session_id and settings.context_management_enabled:
+            previous = JsonSessionStore(settings.session_store_path, settings.session_max_history, settings.session_summary_max_chars).get(request.session_id) or {}
+            options = request.context_options if isinstance(request.context_options, dict) else {}
+            context_package = ContextBuilder(
+                settings.repository_root,
+                max_chars=settings.context_max_chars,
+                max_files=settings.context_max_files,
+                max_file_chars=settings.context_max_file_chars,
+            ).build(request.prompt, previous.get("summary", ""), options.get("file_paths", []))
+            request.prompt = context_package.text
+        shadow_recommendation = None
+        if request.session_id and settings.context_routing_enabled:
+            # Usage and prices are intentionally unknown until provider metadata
+            # or operator-supplied rates exist; this cannot change the route.
+            current_provider = request.provider or "router"
+            candidate_provider = "local_llm" if current_provider != "local_llm" else "fireworks"
+            configured_prices = load_prices(settings.routing_prices_json)
+            current_price = configured_prices.get(f"{current_provider}:{request.model}", configured_prices.get(current_provider, Price()))
+            candidate_price = configured_prices.get(f"{candidate_provider}:{request.model}", configured_prices.get(candidate_provider, Price()))
+            shadow_recommendation = recommend_switch(
+                current_provider=current_provider,
+                candidate_provider=candidate_provider,
+                current_usage=Usage(input_tokens=None, output_tokens=None),
+                candidate_usage=Usage(input_tokens=None, output_tokens=None),
+                current_price=current_price, candidate_price=candidate_price,
+                required_quality=request.required_quality or 0.0,
+                safety_margin=settings.routing_safety_margin,
+                currency=settings.routing_currency,
+            )
         
         # 2. Plan (Heuristic Decomposition)
         planner = TaskPlanner()
@@ -165,7 +198,7 @@ class RelayOSOrchestrator:
         dag = DAGEngine()
         node_map = {}
         for st in sub_tasks:
-            st_req = TaskRequest(task_id=st.id, prompt=st.prompt, execution_mode=request.execution_mode, provider=request.provider, model=request.model)
+            st_req = TaskRequest(task_id=st.id, prompt=st.prompt, execution_mode=request.execution_mode, provider=request.provider, model=request.model, session_id=request.session_id, required_quality=request.required_quality, context_options=request.context_options)
             st_ctx = TaskContext(request=st_req, profile=profile, category=st.category, complexity=context.complexity)
             
             async def _exec_node(node_ref: DAGNode):
@@ -198,6 +231,26 @@ class RelayOSOrchestrator:
         # 4. Aggregate
         aggregator = ResultAggregator()
         final_result = aggregator.aggregate(request.task_id, sub_results)
+        if shadow_recommendation is not None:
+            final_result.routing_metadata = {
+                "mode": "shadow" if settings.context_routing_shadow else "advisory",
+                "recommendation_applied": False,
+                "recommendation": shadow_recommendation.recommendation,
+                "reason": shadow_recommendation.reason,
+                "current_provider": shadow_recommendation.current_provider,
+                "candidate_provider": shadow_recommendation.candidate_provider,
+                "current_cost": asdict(shadow_recommendation.current_cost),
+                "candidate_cost": asdict(shadow_recommendation.candidate_cost),
+            }
+        if context_package is not None:
+            final_result.routing_metadata = final_result.routing_metadata or {}
+            final_result.routing_metadata["context"] = {
+                "files": list(context_package.files),
+                "omitted": list(context_package.omitted),
+                "estimated_tokens": context_package.estimated_tokens,
+                "token_source": context_package.token_source,
+                "truncated": context_package.truncated,
+            }
         
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         fallback_triggered = any(getattr(r, 'fallback_triggered', False) for r in sub_results)
@@ -217,8 +270,21 @@ class RelayOSOrchestrator:
             confidence=final_result.confidence,
             queue_wait_ms=final_result.queue_wait_ms,
             error_code=final_result.error_code,
+            routing_metadata=final_result.routing_metadata,
+            input_tokens=final_result.input_tokens,
+            cached_input_tokens=final_result.cached_input_tokens,
+            cache_write_tokens=final_result.cache_write_tokens,
+            output_tokens=final_result.output_tokens,
+            usage_source=final_result.usage_source,
         )
         await TelemetryService.get_instance().record(trace)
+
+        if request.session_id and settings.context_management_enabled:
+            JsonSessionStore(settings.session_store_path, settings.session_max_history, settings.session_summary_max_chars).append(
+                request.session_id,
+                {"task_id": request.task_id, "provider": trace.provider, "model": trace.model, "outcome": trace.state},
+                summary=(final_result.answer or "")[:settings.session_summary_max_chars],
+            )
         
         return final_result
 
